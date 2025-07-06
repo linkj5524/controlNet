@@ -15,7 +15,7 @@ model:
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
     scale_factor: 0.18215
-    use_ema : True #####False
+    use_ema : False #####False
     only_mid_control: False
 
     control_stage_config:

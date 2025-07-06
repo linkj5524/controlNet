@@ -78,6 +78,7 @@ class DDIMSampler(object):
                **kwargs
                ):
         if conditioning is not None:
+            #判断不同的condition batch维度是否一致
             if isinstance(conditioning, dict):
                 ctmp = conditioning[list(conditioning.keys())[0]]
                 while isinstance(ctmp, list): ctmp = ctmp[0]
@@ -93,13 +94,14 @@ class DDIMSampler(object):
             else:
                 if conditioning.shape[0] != batch_size:
                     print(f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}")
-
+        #设置ddim等方法 采样所需要的参数，包含α，β，t，σ等
         self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=verbose)
         # sampling
         C, H, W = shape
         size = (batch_size, C, H, W)
         print(f'Data shape for DDIM sampling is {size}, eta {eta}')
-
+        # conditioning ：包含 边缘图和 文本信息；
+        #score_corrector： 分数矫正器，此处默认未用到；本质就是修改预测噪声过程中的梯度添加某些项，引导下降过程
         samples, intermediates = self.ddim_sampling(conditioning, size,
                                                     callback=callback,
                                                     img_callback=img_callback,
@@ -146,16 +148,17 @@ class DDIMSampler(object):
         print(f"Running DDIM Sampling with {total_steps} timesteps")
 
         iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
-
+        # 这里的steps 从0 开始，到最大，注意区别
         for i, step in enumerate(iterator):
             index = total_steps - i - 1
+            # ts 表示步长，此代码按照batch，生成符合batch维度的步长
             ts = torch.full((b,), step, device=device, dtype=torch.long)
 
             if mask is not None:
                 assert x0 is not None
                 img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass?
                 img = img_orig * mask + (1. - mask) * img
-
+            #  判断condition 和step 的batch 维度是否一致，并获取 无信息的文本引导强度
             if ucg_schedule is not None:
                 assert len(ucg_schedule) == len(time_range)
                 unconditional_guidance_scale = ucg_schedule[i]

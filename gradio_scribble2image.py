@@ -42,7 +42,7 @@ def process(input_image, prompt, a_prompt, n_prompt, num_samples, image_resoluti
 
         if config.save_memory:
             model.low_vram_shift(is_diffusing=False)
-
+        # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + a_prompt] * num_samples)]}
         un_cond = {"c_concat": None if guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([n_prompt] * num_samples)]}
         shape = (4, H // 8, W // 8)
@@ -112,16 +112,16 @@ if __name__=='__main__':
 
     #参数
     # 定义提示词
-    prompt = "一个美丽的花园，有鲜花和树木，高画质"
-    a_prompt = "最佳质量，高分辨率，详细，逼真"
-    n_prompt = "低质量，模糊，扭曲，噪点"
+    prompt = "一个帅哥"
+    a_prompt = ""
+    n_prompt = ""
 
     # 设置参数
-    num_samples = 2               # 生成图像数量
+    num_samples = 1               # 生成图像数量
     image_resolution = 512        # 图像分辨率
     ddim_steps = 50               # 采样步数
     guess_mode = False            # 是否使用猜测模式
-    strength = 0.8                # 控制生成与输入的相似度
+    strength = 1.0                # 控制生成与输入的相似度
     scale = 9.0                   # 引导系数
     seed = 42                     # 随机种子（用于结果可复现）
     eta = 0.0                     # DDIM采样器的eta参数
@@ -143,4 +143,4 @@ if __name__=='__main__':
     cv2.imwrite('result1.png',img1)
     cv2.imwrite('result2.png',img2)
 
-
+ 

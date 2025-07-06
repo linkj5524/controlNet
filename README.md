@@ -1,10 +1,20 @@
 # 使用说明
+## 0. git失败
+
+> * 在windows下，经常会出现git上传仓库，或者git clone 失败的情况。可以按照如下教程进行解决： https://cloud.tencent.com/developer/article/2527142
+> * 该教程 大致步骤为：
+>     * 1、在windows系统设置代理 
+>     * 2、使用git 设置代理。（注意：此代理不会影响代理软件等的正常使用）
 ## 1. 环境配置
 ### 1.1 安装依赖
 
 
 * pip install -r requirements.txt
-安装必要的包，按照environment.yaml 的版本按照，如果显示加载权重的时候，出现key 对不上等问题，则是版本未完全按照要求安装。如果为完全按照版本安装，则也可以按如下修改：
+    *  下载与cuda toolkit版本匹配的pytorch，根据自己的cuda toolkit版本下载对应的pytorch安装包，并安装。建议使用国内镜像源：
+        pip3 install torch torchvision torchaudio -i https://pypi.tuna.tsinghua.edu.cn/simple --extra-index-url https://download.pytorch.org/whl/cu124
+        
+        比如上述命令，后缀cu124  表示版本（如这里表示12.4版本），根据cuda toolkit版本选择，需对应好。
+* 安装必要的包，按照environment.yaml 的版本按照，如果显示加载权重的时候，出现key 对不上等问题，则是版本未完全按照要求安装。如果为完全按照版本安装，则也可以按如下修改：
 
     * 1.1.1 No module named 'pytorch_lightning.utilities.distributed'
         问题原因：pytorch_lightning版本过高，部分函数已经更换过，故会报错
