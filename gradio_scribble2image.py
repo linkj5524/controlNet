@@ -58,42 +58,16 @@ def process(input_image, prompt, a_prompt, n_prompt, num_samples, image_resoluti
 
         if config.save_memory:
             model.low_vram_shift(is_diffusing=False)
-
+        # 将模型输出的图像进行解码
         x_samples = model.decode_first_stage(samples)
+        #维度变换
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
 
         results = [x_samples[i] for i in range(num_samples)]
+    #以列表形式，返回所有结果
     return [255 - detected_map] + results
 
 
-# block = gr.Blocks().queue()
-# with block:
-    # with gr.Row():
-        # gr.Markdown("## Control Stable Diffusion with Scribble Maps")
-    # with gr.Row():
-        # with gr.Column():
-            # input_image = gr.Image(source='upload', type="numpy")
-            # prompt = gr.Textbox(label="Prompt")
-            # run_button = gr.Button(label="Run")
-            # with gr.Accordion("Advanced options", open=False):
-                # num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
-                # image_resolution = gr.Slider(label="Image Resolution", minimum=256, maximum=768, value=512, step=64)
-                # strength = gr.Slider(label="Control Strength", minimum=0.0, maximum=2.0, value=1.0, step=0.01)
-                # guess_mode = gr.Checkbox(label='Guess Mode', value=False)
-                # ddim_steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=20, step=1)
-                # scale = gr.Slider(label="Guidance Scale", minimum=0.1, maximum=30.0, value=9.0, step=0.1)
-                # seed = gr.Slider(label="Seed", minimum=-1, maximum=2147483647, step=1, randomize=True)
-                # eta = gr.Number(label="eta (DDIM)", value=0.0)
-                # a_prompt = gr.Textbox(label="Added Prompt", value='best quality, extremely detailed')
-                # n_prompt = gr.Textbox(label="Negative Prompt",
-                                    #   value='longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality')
-        # with gr.Column():
-            # result_gallery = gr.Gallery(label='Output', show_label=False, elem_id="gallery").style(grid=2, height='auto')
-    # ips = [input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, ddim_steps, guess_mode, strength, scale, seed, eta]
-    # run_button.click(fn=process, inputs=ips, outputs=[result_gallery])
-
-# 
-# block.launch(server_name='0.0.0.0')
 
 
 if __name__=='__main__':
@@ -112,7 +86,7 @@ if __name__=='__main__':
 
     #参数
     # 定义提示词
-    prompt = "一个帅哥"
+    prompt = "a handsome boy with a long hair "
     a_prompt = ""
     n_prompt = ""
 

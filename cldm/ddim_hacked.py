@@ -50,7 +50,11 @@ class DDIMSampler(object):
             (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod) * (
                         1 - self.alphas_cumprod / self.alphas_cumprod_prev))
         self.register_buffer('ddim_sigmas_for_original_num_steps', sigmas_for_original_sampling_steps)
-
+    '''
+    采样的主函数，通过输入参数，即可实现采样
+    
+    
+    '''
     @torch.no_grad()
     def sample(self,
                S,
@@ -120,7 +124,10 @@ class DDIMSampler(object):
                                                     ucg_schedule=ucg_schedule
                                                     )
         return samples, intermediates
-
+    '''
+    采样过程的核心过程，根据步长等信息，实现采样
+    
+    '''
     @torch.no_grad()
     def ddim_sampling(self, cond, shape,
                       x_T=None, ddim_use_original_steps=False,
@@ -131,29 +138,31 @@ class DDIMSampler(object):
                       ucg_schedule=None):
         device = self.model.betas.device
         b = shape[0]
+        #x_T:初始噪声，如果没有输入，则随机初始化
         if x_T is None:
             img = torch.randn(shape, device=device)
         else:
             img = x_T
-
+        # 根据是否使用原始steps（不跳跃采样）， 确定steps，不翻转，正向的steps，从0到step_max
+        # 这里的steps 从1 开始，到最大，注意区别
         if timesteps is None:
             timesteps = self.ddpm_num_timesteps if ddim_use_original_steps else self.ddim_timesteps
         elif timesteps is not None and not ddim_use_original_steps:
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
-            timesteps = self.ddim_timesteps[:subset_end]
-
+            timesteps = self.ddim_timesteps[:subset_end] 
+        # 根据判断，翻转 steps，从最大到0，反向的steps
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         print(f"Running DDIM Sampling with {total_steps} timesteps")
 
         iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
-        # 这里的steps 从0 开始，到最大，注意区别
+        # 这里的steps 从1 开始，到最大，注意区别
         for i, step in enumerate(iterator):
             index = total_steps - i - 1
             # ts 表示步长，此代码按照batch，生成符合batch维度的步长
             ts = torch.full((b,), step, device=device, dtype=torch.long)
-
+            # 判断是否添加mask
             if mask is not None:
                 assert x0 is not None
                 img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass?
@@ -179,41 +188,46 @@ class DDIMSampler(object):
                 intermediates['pred_x0'].append(pred_x0)
 
         return img, intermediates
-
+    '''
+    单步采样的核心函数
+    '''
     @torch.no_grad()
     def p_sample_ddim(self, x, c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
                       dynamic_threshold=None):
         b, *_, device = *x.shape, x.device
-
+        # model 根据原始sd模型，生成预测结果，预测的是噪声
+        # c 表示条件信息，t 表示步长，unconditional_guidance_scale 表示无信息引导强度，unconditional_conditioning 表示无信息条件
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
             model_output = self.model.apply_model(x, t, c)
         else:
             model_t = self.model.apply_model(x, t, c)
             model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
             model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
-
+        # 模型的参数化方法，如果模型预测的是速度项，需要转换成噪声
         if self.model.parameterization == "v":
             e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)
         else:
             e_t = model_output
-
+        # 是否需要利用分数矫正器，改进模型预测的噪声 ，corrector_kwargs表示所需要的矫正参数
         if score_corrector is not None:
             assert self.model.parameterization == "eps", 'not implemented'
             e_t = score_corrector.modify_score(self.model, e_t, x, t, c, **corrector_kwargs)
-
+        # 参数准备，包括α，β，t，σ等，
         alphas = self.model.alphas_cumprod if use_original_steps else self.ddim_alphas
         alphas_prev = self.model.alphas_cumprod_prev if use_original_steps else self.ddim_alphas_prev
         sqrt_one_minus_alphas = self.model.sqrt_one_minus_alphas_cumprod if use_original_steps else self.ddim_sqrt_one_minus_alphas
         sigmas = self.model.ddim_sigmas_for_original_num_steps if use_original_steps else self.ddim_sigmas
         # select parameters corresponding to the currently considered timestep
+        # 根据batchsize 准备张量，包括α，β，t，σ等，
         a_t = torch.full((b, 1, 1, 1), alphas[index], device=device)
         a_prev = torch.full((b, 1, 1, 1), alphas_prev[index], device=device)
         sigma_t = torch.full((b, 1, 1, 1), sigmas[index], device=device)
         sqrt_one_minus_at = torch.full((b, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
 
         # current prediction for x_0
+        # 计算出x_0的预测结果
         if self.model.parameterization != "v":
             pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
         else:
@@ -225,7 +239,9 @@ class DDIMSampler(object):
         if dynamic_threshold is not None:
             raise NotImplementedError()
 
+        #从 预测的x_0 等，计算出x_t（当前步长）的预测结果
         # direction pointing to x_t
+        
         dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
         noise = sigma_t * noise_like(x.shape, device, repeat_noise) * temperature
         if noise_dropout > 0.:
@@ -233,6 +249,9 @@ class DDIMSampler(object):
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
         return x_prev, pred_x0
 
+    '''
+    逆采样过程，将由图像得到的latent 逐渐添加噪声。
+    '''
     @torch.no_grad()
     def encode(self, x0, c, t_enc, use_original_steps=False, return_intermediates=None,
                unconditional_guidance_scale=1.0, unconditional_conditioning=None, callback=None):
@@ -288,7 +307,7 @@ class DDIMSampler(object):
         if use_original_steps:
             sqrt_alphas_cumprod = self.sqrt_alphas_cumprod
             sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod
-        else:
+        else: 
             sqrt_alphas_cumprod = torch.sqrt(self.ddim_alphas)
             sqrt_one_minus_alphas_cumprod = self.ddim_sqrt_one_minus_alphas
 

@@ -5,8 +5,13 @@ import torch
 import torchvision
 from PIL import Image
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.utilities.distributed import rank_zero_only
-
+# from pytorch_lightning.utilities.distributed import rank_zero_only
+try:
+    # 适用于 PyTorch Lightning 2.0+
+    from pytorch_lightning.utilities.rank_zero import rank_zero_only
+except ImportError:
+    # 适用于旧版本
+    from pytorch_lightning.utilities.distributed import rank_zero_only
 
 class ImageLogger(Callback):
     def __init__(self, batch_frequency=2000, max_images=4, clamp=True, increase_log_steps=True,
