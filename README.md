@@ -64,6 +64,8 @@ ldm\modules\diffusionmodules\model.py 下面有个xformers 不能正确安装（
 * DDIMSampler 类，封装 ControlLDM类（输入ControlLDM 类），可以调用类函数，实现采样，编码，解码等功能
 * LatentDiffusion类，继承自DDPM 类，并给出了一些辅助函数。
 * DDPM类 继承自pl.LightningModule
+## 模型初始化流程
+模型直接导入ControlLDM类，该类的初始化方法继承自 LatentDiffusion类，LatentDiffusion类的初始化方法又继承自DDPM类，DDPM类的初始化方法又继承自pl.LightningModule类。 DDPM类初始化方法中，定义了模型，模型为同文件的DiffusionWrapper 类；latentDiffusion类定义了其他内容。模型文本编码为向量等 都在ldm\models\diffusion\ddpm.py文件的类初始化，较为复杂。
 
 ## cldm\cldm.py
 controlnet的模型结构定义，包括解码latent ；clip 的文本编码器；变分自编码器等
@@ -84,6 +86,27 @@ ControlLDM 类，继承自LatentDiffusion，整个controlnet 模型调用的主�
 
 ### ControlNet
 * 就是一个controlnet 模型的定义，包含模型定义，forward 方法。
+
+
+### 模型关系
+
+* ControlLDM 初始化
+    * 继承父类LatentDiffusion 的初始化方法，进行初始化，包括参数的设置，实例化扩散模型（U-Net）等，具体内容参考DDPM 类初始化方法、LatentDiffusion 类初始化方法。
+
+    >> 此部分内容较多，较复杂。里面的U-Net （cldm\cldm.py 的ControlledUnetModel类）与后续的导入ControlNet（cldm\cldm.py 的ControlNet 类） 模型的关系是什么，还需要搞清楚。
+
+    * 导入ControlNet 模型，
+    * 控制 scale 等参数的设置
+
+
+* ControlledUnetModel类 与ControlNet 类模型关系说明：
+
+ControlledUnetModel：可接收控制信号的 U-Net 变体；ControlNet：条件到控制信号的转换器；
+
+ControlNet 类： 
+* 包括 输入条件处理（input_hint_block）：专门处理用户输入的条件（如边缘图、深度图），通过卷积层将条件转换为与 U-Net 特征兼容的格式。
+* 包括 与 U-Net 对齐的特征提取块：包含输入块（input_blocks）、中间块（middle_block），结构与 ControlledUnetModel 的 U-Net 对应（下采样、注意力层、残差块），确保输出的控制信号与 U-Net 各层特征维度匹配。
+* 包括 零卷积（zero_convs）：每个输入块和中间块后接 “零初始化卷积”，用于生成控制信号（初始权重为 0，确保训练初期不干扰原始 U-Net）
 
 ## ldm\util.py
 * log_txt_as_img ：将文本转换为图像张量
@@ -120,9 +143,125 @@ ControlLDM 类，继承自LatentDiffusion，整个controlnet 模型调用的主�
 * decode： 解码器，将初始噪声样本 $x_T$ 逐步解码$x_0$
 
 ## ldm\models\diffusion\ddpm.py
-### DDPM 类
-
+该文件比较重要，主函数的 模型初始化的过程中，继承了很多本文件类的初始化的操作。会有很多的  参数的配置
 
 ### LatentDiffusion 类
+
+1、初始化步骤：
+
+
+* 设置 条件生成策略 （是否 强制使用空条件、条件信息在扩散时间步中生效的步数，默认为1）、数据预处理（是否 使用标准差归一化）
+* 动态配置条件信息融合方式，默认使用 交叉注意力机制融合，（直接特征拼接、禁用条件融合； 图像与文本信息的融合方式）
+* 从字典中加载参数，包括模型的参数路径（ckpt_path ），EMA参数（是否重置 EMA 权重（布尔值）；是否重置 EMA 更新计数器（布尔值） ） 等
+* 调用 父类（DDPM）的初始化函数
+    * 参数化模式配置： 比如模型预测的是噪声还是$x_0$,还是预测速度场$v$
+    * 条件模型初始化: 将条件信息（如文本、图像）转换为模型可理解的嵌入表示。比如clip，此处设置为None，后续再具体初始化条件模型
+    * 日志记录频率，first_stage_key；图片的size，通道数；是否使用位置编码（默认为True）
+    * model 的初始化，调用了DiffusionWrapper （同一文件夹内的类）模型
+        * 顺序交叉注意力配置，是否顺序处理交叉注意力，如果是，则计算慢，但是省内存；反之 效果相反。
+        * 实例化扩散模型（U-Net）： sd模型的初始化，即U-Net结构的噪声预测器（或者是速度场预测器等，默认预测噪声，其他参数的预测，实际上也是基于此，只不过计算公式不一样）
+        
+        注意：实例化模型，就是controlNet模型，包含sd模型，以及控制部分。模型的定义在 ControlledUnetModel类（cldm\cldm.py 文件中定义）
+
+        * 记录条件的混合参数，交叉注意力融合 还是直接连接的融合
+    * 模型的训练稳定性（EMA 配置）、损失优化（权重参数）、硬件适配（make_it_fit）和权重管理（检查点加载与重置）
+
+*  XXX 参数的设置等
+* VAE 的初始化
+* 文本编码器的初始化
+
+
+
+
+
+
+
+
+
+
+
+### DDPM 类
+1、初始化步骤：
+
+参考LatentDiffusion 类 调用父类的初始化函数
+
+2、类成员函数说明
+*  register_schedule： 扩散模型中注册噪声调度参数的核心逻辑，主要用于计算和缓存扩散过程中所需的各种参数，
+*  ema_scope: 用于临时将模型参数切换到EMA 的权重，使用完以后再恢复原始模型参数。下面是使用方法：
+```
+with self.ema_scope(context="Validation"):
+    # 用EMA权重生成验证样本，计算FID等指标
+    val_samples = self.sample(batch_size=8)
+    val_fid = compute_fid(val_samples, real_data)
+```
+* init_from_ckpt： 初始化模型
+* q_mean_variance 方法的作用是：根据原始数据 $x_0$（x_start）和扩散步数 t，计算t时刻带噪声样本 的均值方差，用于加噪过程的参数计算，方便后续根据此参数重采样，生成$x_t$
+ 
+ % 均值、方差及对数方差公式
+$$
+\begin{aligned}
+% 均值公式
+\mu_q(x_t \mid x_0) &= \sqrt{\bar{\alpha}_t} \cdot x_0 \\
+% 方差公式
+\sigma_q^2(x_t \mid x_0) &= 1 - \bar{\alpha}_t \\
+% 对数方差公式
+\log \sigma_q^2(x_t \mid x_0) &= \log\left(1 - \bar{\alpha}_t\right)
+\end{aligned}
+$$ 
+
+% 符号说明
+其中：
+- $ x_0 $：原始无噪声数据（如输入图像）；
+- $ t $：扩散过程的时间步$ 0 \leq t \leq T $，$ T $ 为总步数；
+- $ \alpha_s = 1 - \beta_s $：第 $ s $ 步的“保持系数”（$ \beta_s $ 为第 $ s $ 步的噪声强度）；
+- $ \bar{\alpha}_t = \prod_{s=1}^t \alpha_s $：前 $ t $ 步的累积保持系数，反映 $ x_t $ 中原始数据的残留比例。
+
+% 完整分布定义
+$$
+q(x_t \mid x_0) \sim \mathcal{N}\left( \mu_q(x_t \mid x_0) = \sqrt{\bar{\alpha}_t} \cdot x_0 \,,\ \sigma_q^2(x_t \mid x_0) = 1 - \bar{\alpha}_t \right)
+$$
+
+* predict_start_from_noise :从带噪声的样本 $x_t$和预测的噪声 noise中还原出原始数据 $x_0$.用于计算下一步$x_{t-1}$的latent
+* predict_start_from_z_and_v: 通过预测速度场 v来还原原始数据$ x_0$
+​
+* predict_eps_from_z_and_v: 通过预测速度场 v来还原噪声样本$ x_t$
+* q_posterior: 扩散模型中的后验分布计算，即给定原始数据 $x_0$和 t时刻的带噪声样本 x_t，计算后验分布$ q(x_{-1} \mid x_t,x_0)$,返回分布的均值方差，用于重采样
+* p_mean_variance ：扩散模型的反向过程（去噪）的核心逻辑，通过模型预测和后验分布计算，从带噪声的样本 $x_t$逐步恢复出原始数据 $x_0$
+​* p_sample:扩散模型反向过程中的单步采样，即从 t时刻的噪声样本 $x_t$生成 t−1时刻的去噪样本$ x_{t−1}$
+​* p_sample_loop :初始化随机噪声 $x_T$ ∼$N(0,I)$。从最大时间步 T到 0，迭代调用 p_sample 进行单步去噪。可选地记录中间步骤的样本，用于可视化或分析。
+* sample:扩散模型的高层采样接口，用于快速生成一批样本（如图像）。它封装了完整的反向采样流程，让用户只需指定批量大小即可获得生成结果，无需关心底层实现细节。
+* q_sample:扩散模型的前向加噪过程，即从原始数据 $x_0$逐步添加噪声，生成 t时刻的带噪声样本 $x_t$
+​* get_v:扩散模型中的速度场（velocity field）计算，即根据带噪声样本$x_t$、噪声 ϵ和时间步 t，计算对应的速度场 v。
+* get_loss:扩散模型训练中的损失函数计算，支持两种常见的损失类型：L1 损失（绝对误差）和 L2 损失（均方误差）。
+* p_losses: 扩散模型的损失计算，根据输入添加噪声，再计算损失。
+* forward：扩散模型的前向传播逻辑，调用p_losses计算损失。
+* get_input: 数据预处理功能，将输入批次中的特定键值数据转换为模型所需的格式。包括维度变换等
+* shared_step： 扩散模型的共享训练 / 验证步骤，将数据预处理和损失计算封装为一个统一接口
+* training_step ：是扩散模型训练的核心流程，通过 UCG 数据增强、损失计算和全面的日志监控，确保模型高效稳定地学习。
+* validation_step ：通过同时评估原始模型和 EMA 模型，提供了更全面的模型性能指标。这种双模型评估策略在扩散模型训练中至关重要，有助于选择最佳模型和分析训练稳定性。
+* on_train_batch_end：训练批次结束后的 EMA 更新
+* _get_rows_from_list：图像网格生成工具
+* log_images：图像生成与日志记录
+* configure_optimizers：优化器配置
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+
 
 

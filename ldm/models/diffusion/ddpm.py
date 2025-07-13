@@ -551,6 +551,7 @@ class LatentDiffusion(DDPM):
             conditioning_key = 'concat' if concat_mode else 'crossattn'
         if cond_stage_config == '__is_unconditional__' and not self.force_null_conditioning:
             conditioning_key = None
+        # 模型权重路径；ema相关参数
         ckpt_path = kwargs.pop("ckpt_path", None)
         reset_ema = kwargs.pop("reset_ema", False)
         reset_num_ema_updates = kwargs.pop("reset_num_ema_updates", False)
@@ -567,7 +568,10 @@ class LatentDiffusion(DDPM):
             self.scale_factor = scale_factor
         else:
             self.register_buffer('scale_factor', torch.tensor(scale_factor))
+        # 处理原始图像与潜在空间的转换，是扩散模型的 “输入 / 输出接口”。
+        #即VAE的初始化
         self.instantiate_first_stage(first_stage_config)
+        # 条件编码，将原始条件信息（如文本）转换为模型可理解的特征向量（如文本嵌入）。
         self.instantiate_cond_stage(cond_stage_config)
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False

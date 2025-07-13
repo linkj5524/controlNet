@@ -77,9 +77,11 @@ if __name__=='__main__':
         
     else:
         print('no cuda')
-
+    # 模型参数里面包含 ControlNet 和ControlledUnetModel 的参数
     model = create_model('./models/cldm_v15.yaml').cpu()
-    model.load_state_dict(load_state_dict('./models/control_sd15_scribble.pth', location='cuda'),strict=False)
+    temp=load_state_dict('./models/control_sd15_scribble.pth', location='cuda')
+    #nn.model 自带的参数加载函数
+    model.load_state_dict(temp,strict=False)
     model = model.cuda()
     ddim_sampler = DDIMSampler(model)
 
