@@ -250,7 +250,7 @@ class DDIMSampler(object):
         return x_prev, pred_x0
 
     '''
-    逆采样过程，将由图像得到的latent 逐渐添加噪声。
+    逆采样过程，对由图像得到的latent 逐渐添加噪声。
     '''
     @torch.no_grad()
     def encode(self, x0, c, t_enc, use_original_steps=False, return_intermediates=None,
