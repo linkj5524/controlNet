@@ -96,10 +96,11 @@ class ADV_ATTACK:
             params = self.default_params
         else:
             params = {**self.default_params, **params}
-        
+        self.default_params = params
         # 设置随机种子以确保结果可复现
         torch.manual_seed(params["seed"])
         np.random.seed(params["seed"])
+        self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
        
        
@@ -112,8 +113,10 @@ class ADV_ATTACK:
 
 
         # 预处理图像
-        ## 确保图像通道正常
+        ## 确保图像通道正常,对图像的size有要求，不能随便的大小
         control_image=HWC3(control_image)
+        control_image = cv2.resize(control_image, (self.default_params["image_resolution"],self.default_params["image_resolution"]))
+
         ## 处理控制图像，并返回边缘图和边缘的control
         self.edge_image,self.control=self.generate_edge_control_from_image(control_image)
 
@@ -154,14 +157,36 @@ class ADV_ATTACK:
         #对图像进行编码，转换为latent
         temp_tensor=self.to_tensor_from_image(control_image)
         latent=self.img_to_latent(temp_tensor)
-        images = self.latent_to_img(latent)
+
+        # 设置采样参数
+        self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
+        # 使用封装的ddim进行逆采样
+        x_next, out=self.ddim_sampler.encode(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
+               unconditional_guidance_scale=1, unconditional_conditioning=un_cond, callback=None)
         
-        img1=cv2.cvtColor(images[0], cv2.COLOR_RGB2BGR)
         
-        cv2.imwrite('result1.png',images[0])
+        # 对latent进行优化
+
+
+
+
+
+
         
-        return images
+        # 将所有的latent转换成图片
+        for i in range(len(out["intermediates"])):
+            image=self.latent_to_img(out["intermediates"][i])
+
+            cv2.imwrite("{}/{}.png".format("./exp/result", i), image[0])
+        # images = self.latent_to_img(latent)
+        
+        # img1=cv2.cvtColor(images[0], cv2.COLOR_RGB2BGR)
+        
+        # cv2.imwrite('result1.png',images[0])
+        
+        return 
     def to_tensor_from_image(self, image):
+
 
         # 转换到-1到1
         image = image.astype(np.float32) / 127.5 - 1.0
@@ -170,6 +195,7 @@ class ADV_ATTACK:
 
         # 4. 调整维度顺序：从[H, W, C]转换为[C, H, W]（PyTorch要求的通道优先格式）
         tensor = tensor.permute(2, 0, 1)
+        
         return tensor.unsqueeze(0)
     
 
@@ -182,6 +208,8 @@ class ADV_ATTACK:
         detected_map: 边缘图(size: [H, W])
         control: 边缘的control(size: [num_samples, 3, H, W])
         '''
+        # resize,opencv 格式
+        
         H, W, C = image.shape
 
         detected_map = np.zeros_like(image, dtype=np.uint8)
@@ -208,7 +236,7 @@ class ADV_ATTACK:
             #     z = posterior.sample()  # 随机采样（带随机性）
             # else:
             z = posterior.mode()    # 取均值（确定性结果，推荐用于推理）
-
+        z=z.to(self.device)
         return z   
     def latent_to_img(self,latent):
         img = self.model.first_stage_model.decode(latent)

@@ -9,6 +9,7 @@ from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
 from ldm.util import instantiate_from_config
 from ldm.modules.ema import LitEma
 
+from tools.util.util import *
 
 class AutoencoderKL(pl.LightningModule):
     def __init__(self,
@@ -86,6 +87,10 @@ class AutoencoderKL(pl.LightningModule):
         return posterior
 
     def decode(self, z):
+
+        device=get_module_device(self.post_quant_conv)
+        if z.device != device:
+            z = z.to(device)
         z = self.post_quant_conv(z)
         dec = self.decoder(z)
         return dec

@@ -19,11 +19,18 @@ from ldm.util import log_txt_as_img, exists, instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 
 
+from tools.util.util import *
+
+
 class ControlledUnetModel(UNetModel):
     def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
         hs = []
         with torch.no_grad():
             t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+            device=get_module_device(self.time_embed)
+            t_emb=t_emb.to(device=device)
+
+
             emb = self.time_embed(t_emb)
             h = x.type(self.dtype)
             for module in self.input_blocks:
@@ -283,6 +290,9 @@ class ControlNet(nn.Module):
 
     def forward(self, x, hint, timesteps, context, **kwargs):
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        device=get_module_device(self.time_embed)
+        t_emb=t_emb.to(device=device)
+
         emb = self.time_embed(t_emb)
 
         guided_hint = self.input_hint_block(hint, emb, context)
@@ -327,6 +337,12 @@ class ControlLDM(LatentDiffusion):
 
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
         assert isinstance(cond, dict)
+        # 判断device，统一移到模型所在的device
+        device=self.model.device
+        cond = {k: [v_item.to(device) for v_item in v] for k, v in cond.items()}
+        
+        x_noisy=x_noisy.to(device=device)
+
         diffusion_model = self.model.diffusion_model
 
         cond_txt = torch.cat(cond['c_crossattn'], 1)
