@@ -161,7 +161,7 @@ class ADV_ATTACK:
         # 设置采样参数
         self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
         # 使用封装的ddim进行逆采样
-        x_next, out=self.ddim_sampler.encode(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
+        x_next, out=self.ddim_sampler.encode_return_all(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
                unconditional_guidance_scale=1, unconditional_conditioning=un_cond, callback=None)
         
         
@@ -173,11 +173,11 @@ class ADV_ATTACK:
 
 
         
-        # 将所有的latent转换成图片
-        for i in range(len(out["intermediates"])):
-            image=self.latent_to_img(out["intermediates"][i])
+        # # 将所有的latent转换成图片
+        # for i in range(len(out["intermediates"])):
+        #     image=self.latent_to_img(out["intermediates"][i])
 
-            cv2.imwrite("{}/{}.png".format("./exp/result", i), image[0])
+        #     cv2.imwrite("{}/{}.png".format("./exp/result", i), image[0])
         # images = self.latent_to_img(latent)
         
         # img1=cv2.cvtColor(images[0], cv2.COLOR_RGB2BGR)
