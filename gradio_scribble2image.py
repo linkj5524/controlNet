@@ -93,7 +93,7 @@ if __name__=='__main__':
     n_prompt = ""
 
     # 设置参数
-    num_samples = 1               # 生成图像数量
+    num_samples = 2               # 生成图像数量
     image_resolution = 512        # 图像分辨率
     ddim_steps = 50               # 采样步数
     guess_mode = False            # 是否使用猜测模式
@@ -103,6 +103,7 @@ if __name__=='__main__':
     eta = 0.0                     # DDIM采样器的eta参数
 
     img=cv2.imread('test_imgs\human_line.png')
+    img=cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
     # 调用函数
     resu = process(
         img, prompt, a_prompt, n_prompt,
@@ -114,8 +115,8 @@ if __name__=='__main__':
 
     
     # resu=process(img, 'best quality, extremely detailed', 'longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality', 1, 512, 20, False, 1.0, 9.0, -1, 0.0)
-    img1=cv2.cvtColor(resu[0], cv2.COLOR_BGR2RGB)
-    img2=cv2.cvtColor(resu[1], cv2.COLOR_BGR2RGB)
+    img1=cv2.cvtColor(resu[0], cv2.COLOR_RGB2BGR)
+    img2=cv2.cvtColor(resu[1], cv2.COLOR_RGB2BGR)
     cv2.imwrite('result1.png',img1)
     cv2.imwrite('result2.png',img2)
 

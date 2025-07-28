@@ -1,6 +1,6 @@
 
 from share import *
-import config
+
 
 import cv2
 import einops
@@ -124,7 +124,7 @@ class ADV_ATTACK:
 
         # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {
-            "c_concat": [self.control],
+            "c_concat": [self.edge_image],
             "c_crossattn": [
                 self.model.get_learned_conditioning(
                     [params["prompt"] + ', ' + params["a_prompt"]] * params["num_samples"]
@@ -162,10 +162,16 @@ class ADV_ATTACK:
         self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
         # 使用封装的ddim进行逆采样
         x_next, out=self.ddim_sampler.encode_return_all(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
-               unconditional_guidance_scale=1, unconditional_conditioning=un_cond, callback=None)
+               unconditional_guidance_scale=9, unconditional_conditioning=un_cond, callback=None)
         
         
-        # 对latent进行优化
+        # 对初始latent进行优化
+        # 需要 1. 优化目标 2. 优化器 3. 优化参数 4. 后处理函数
+        # 优化目标：目标检测模型的输出与原始的检测框，类别等的差值
+        # 优化器：Adam
+        # 优化参数：latent
+        # 后处理函数，根据检测模型的输出，得到结果，并进行优化
+
 
 
 
@@ -174,6 +180,11 @@ class ADV_ATTACK:
 
         
         # # 将所有的latent转换成图片
+        # path="./exp/result"
+        # ## 判断路径是否存在，不存在则创建
+        # if not os.path.exists(path):
+        #     os.mkdir(path)
+        
         # for i in range(len(out["intermediates"])):
         #     image=self.latent_to_img(out["intermediates"][i])
 
@@ -211,9 +222,11 @@ class ADV_ATTACK:
         # resize,opencv 格式
         
         H, W, C = image.shape
+        # 使用opencv 进行边缘检测
+        detected_map = cv2.Canny(image, 100, 200)
 
-        detected_map = np.zeros_like(image, dtype=np.uint8)
-        detected_map[np.min(image, axis=2) < 127] = 255
+        # detected_map = np.zeros_like(image, dtype=np.uint8)
+        # detected_map[np.min(image, axis=2) < 127] = 255
 
         control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
         control = torch.stack([control for _ in range(self.default_params["num_samples"])], dim=0)
@@ -259,26 +272,45 @@ class ADV_ATTACK:
 
 
 # 使用示例
-if __name__ == "__main__":
-    # 初始化攻击类
-    attacker = ADV_ATTACK(
-        config_path='./models/cldm_v15.yaml',
-        model_path='./models/control_sd15_scribble.pth'
-    )
-    
-    # 可选：更新参数
-    attacker.set_params(
-        prompt="a beautiful princess with long hair",
-        scale=10.0,
-        seed=42
-    )
-    
-    # 加载控制图像（如果需要）
-    # control_image = Image.open("path/to/control_image.png").convert("RGB")
-    
-    # 生成对抗样本
-    adversarial_images = attacker.generate_adversarial_example()
-    
-    # 保存结果
-    for i, img in enumerate(adversarial_images):
-        img.save(f"adversarial_example_{i}.png")    
+if __name__=='__main__':
+    # 添加本地包路径,即上一级的路径
+    os.path.join(os.path.dirname(__file__), "..")
+
+
+    from annotator.util import resize_image, HWC3
+    from cldm.model import create_model, load_state_dict
+    from cldm.ddim_hacked import DDIMSampler
+    import config
+
+
+
+    #判断gpu 是否存在，并给出版本
+    if torch.cuda.is_available():
+        print('cuda version:', torch.version.cuda)
+        
+    else:
+        print('no cuda')
+    # 模型参数里面包含 ControlNet 和ControlledUnetModel 的参数
+
+
+
+    #参数
+    # 定义提示词
+    prompt = "a handsome boy with a long hair "
+    a_prompt = ""
+    n_prompt = ""
+
+    # 设置参数
+    num_samples = 1               # 生成图像数量
+    image_resolution = 512        # 图像分辨率
+    ddim_steps = 50               # 采样步数
+    guess_mode = False            # 是否使用猜测模式
+    strength = 1.0                # 控制生成与输入的相似度
+    scale = 9.0                   # 引导系数
+    seed = 42                     # 随机种子（用于结果可复现）
+    eta = 0.0                     # DDIM采样器的eta参数
+
+    img=cv2.imread('test_imgs\man.png')
+
+    attack = ADV_ATTACK(device=torch.device("cuda"))
+    attack.generate_adversarial_example(img)

@@ -39,3 +39,14 @@ def get_module_device(module: Module) -> torch.device:
         raise ValueError("模块及其子模块没有任何参数或缓冲区，无法确定设备。请先初始化模块参数。")
     
     return device
+
+
+def concat_dicts(c, unconditional_conditioning):
+    # 确保两个字典的键相同
+    assert c.keys() == unconditional_conditioning.keys(), "两个字典的键必须一致"
+    
+    merged = {}
+    for key in c:
+        # 对每个键对应的张量沿第0维拼接（可根据需求修改dim）
+        merged[key] = c[key]+unconditional_conditioning[key]
+    return merged

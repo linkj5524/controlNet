@@ -6,6 +6,9 @@ from tqdm import tqdm
 
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, extract_into_tensor
 
+# 自建函数
+# 
+from tools.util.util import *
 
 class DDIMSampler(object):
     def __init__(self, model, schedule="linear", **kwargs):
@@ -314,7 +317,7 @@ class DDIMSampler(object):
             alphas_next = self.alphas_cumprod[:num_steps]
             alphas = self.alphas_cumprod_prev[:num_steps]
         else:
-            alphas_next = self.ddim_alphas[:num_steps]
+            alphas_next = self.ddim_alphas[:num_steps]   
             alphas = torch.tensor(self.ddim_alphas_prev[:num_steps])
 
         x_next = x0
@@ -328,7 +331,7 @@ class DDIMSampler(object):
                 assert unconditional_conditioning is not None
                 e_t_uncond, noise_pred = torch.chunk(
                     self.model.apply_model(torch.cat((x_next, x_next)), torch.cat((t, t)),
-                                           torch.cat((unconditional_conditioning, c))), 2)
+                                           concat_dicts(unconditional_conditioning, c)), 2)
                 noise_pred = e_t_uncond + unconditional_guidance_scale * (noise_pred - e_t_uncond)
 
             xt_weighted = (alphas_next[i] / alphas[i]).sqrt() * x_next
@@ -340,7 +343,7 @@ class DDIMSampler(object):
                 inter_steps.append(i)
             if callback: callback(i)
 
-            
+
 
         out = {'x_encoded': x_next, 'intermediate_steps': inter_steps}
         if return_intermediates:
