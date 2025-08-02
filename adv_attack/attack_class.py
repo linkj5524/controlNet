@@ -20,7 +20,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from annotator.util import resize_image, HWC3
 from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
-
+from object_detection_class import ObjectDetection
 
 
 
@@ -29,6 +29,9 @@ class ADV_ATTACK:
     def __init__(self, config_path:str='./models/cldm_v15.yaml',
                   model_path:str='./models/control_sd15_scribble.pth', 
                   device:torch.device=torch.device("cuda"),
+                  model_type:str='yolov11',
+                  class_names:list=[],
+                  model_path_object_detection:str=None,
                   **kwargs
                   ):
         """
@@ -36,7 +39,9 @@ class ADV_ATTACK:
         
         参数:
             config_path: 模型配置文件路径 (默认 "./models/cldm_v15.yaml")
-            model_path: 预训练模型权重路径 (默认 "./models/control_sd15_scribble.pth")
+            device: 运行设备 (默认 "cuda")
+            model_type: 目标检测模型类型 (默认 "yolov5")
+            class_names: 目标检测模型类别 (默认 ['person'])
             device: 运行设备 (默认 "cuda")
         """
         # 加载模型配置
@@ -49,6 +54,12 @@ class ADV_ATTACK:
         self.model.load_state_dict(load_state_dict(self.model_path, location='cuda'),strict=False)
         self.ddim_sampler = DDIMSampler(self.model)
         
+  
+        # 加载检测模型
+        self.object_detection=ObjectDetection(model_type,
+                                              model_path=model_path_object_detection,
+                                              class_names=class_names,
+                                              device=torch.device("cpu"))
         
         # 默认参数配置
         if kwargs:
@@ -124,7 +135,7 @@ class ADV_ATTACK:
 
         # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {
-            "c_concat": [self.edge_image],
+            "c_concat": [self.control],
             "c_crossattn": [
                 self.model.get_learned_conditioning(
                     [params["prompt"] + ', ' + params["a_prompt"]] * params["num_samples"]
@@ -164,7 +175,10 @@ class ADV_ATTACK:
         x_next, out=self.ddim_sampler.encode_return_all(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
                unconditional_guidance_scale=9, unconditional_conditioning=un_cond, callback=None)
         
+
         
+        
+
         # 对初始latent进行优化
         # 需要 1. 优化目标 2. 优化器 3. 优化参数 4. 后处理函数
         # 优化目标：目标检测模型的输出与原始的检测框，类别等的差值
@@ -177,7 +191,12 @@ class ADV_ATTACK:
 
 
 
+        
+        # #实验
+        # image=self.latent_to_img(out["intermediates"][0])
 
+        
+        # bbox_xyxy, confidences, class_ids  =self.object_detection.detect(image)
         
         # # 将所有的latent转换成图片
         # path="./exp/result"
@@ -223,8 +242,10 @@ class ADV_ATTACK:
         
         H, W, C = image.shape
         # 使用opencv 进行边缘检测
-        detected_map = cv2.Canny(image, 100, 200)
-
+        canny_map = cv2.Canny(image, 100, 200)
+        # 黑白交换（位运算反转）
+        detected_single_map = cv2.bitwise_not(canny_map)
+        detected_map = np.stack([detected_single_map]*3, axis=-1)
         # detected_map = np.zeros_like(image, dtype=np.uint8)
         # detected_map[np.min(image, axis=2) < 127] = 255
 
@@ -311,6 +332,7 @@ if __name__=='__main__':
     eta = 0.0                     # DDIM采样器的eta参数
 
     img=cv2.imread('test_imgs\man.png')
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    attack = ADV_ATTACK(device=torch.device("cuda"))
+    attack = ADV_ATTACK(device=torch.device("cuda"),model_path_object_detection='./models/yolo11n.pt')
     attack.generate_adversarial_example(img)

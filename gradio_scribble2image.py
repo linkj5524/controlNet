@@ -119,5 +119,6 @@ if __name__=='__main__':
     img2=cv2.cvtColor(resu[1], cv2.COLOR_RGB2BGR)
     cv2.imwrite('result1.png',img1)
     cv2.imwrite('result2.png',img2)
+    cv2.imwrite('result_origin_chanell.png',resu[1])
 
  
