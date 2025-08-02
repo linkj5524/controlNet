@@ -91,7 +91,7 @@ class ADV_ATTACK:
             else:
                 print(f"警告: 参数 {key} 不是有效参数，将被忽略")
     
-    def generate_adversarial_example(self, control_image=None, params=None):
+    def generate_adversarial_example(self, input_image=None, params=None):
         """
         生成对抗样本
         
@@ -125,11 +125,11 @@ class ADV_ATTACK:
 
         # 预处理图像
         ## 确保图像通道正常,对图像的size有要求，不能随便的大小
-        control_image=HWC3(control_image)
-        control_image = cv2.resize(control_image, (self.default_params["image_resolution"],self.default_params["image_resolution"]))
+        input_image=HWC3(input_image)
+        input_image = cv2.resize(input_image, (self.default_params["image_resolution"],self.default_params["image_resolution"]))
 
         ## 处理控制图像，并返回边缘图和边缘的control
-        self.edge_image,self.control=self.generate_edge_control_from_image(control_image)
+        self.edge_image,self.control=self.generate_edge_control_from_image(input_image)
 
 
 
@@ -152,7 +152,7 @@ class ADV_ATTACK:
         }
  
  
-        H, W, C = control_image.shape
+        H, W, C = input_image.shape
         shape = (4, H // 8, W // 8)
 
         if params["save_memory"]:
@@ -166,12 +166,13 @@ class ADV_ATTACK:
         )  # Magic number. IDK why
         
         #对图像进行编码，转换为latent
-        temp_tensor=self.to_tensor_from_image(control_image)
+        temp_tensor=self.to_tensor_from_image(input_image)
         latent=self.img_to_latent(temp_tensor)
 
         # 设置采样参数
         self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
         # 使用封装的ddim进行逆采样
+        ## x_next 表示逆采样的结果（噪声最大的latent），out 表示所有的中间结果
         x_next, out=self.ddim_sampler.encode_return_all(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
                unconditional_guidance_scale=9, unconditional_conditioning=un_cond, callback=None)
         
@@ -185,6 +186,9 @@ class ADV_ATTACK:
         # 优化器：Adam
         # 优化参数：latent
         # 后处理函数，根据检测模型的输出，得到结果，并进行优化
+        
+        # 初始图片的推理结果
+        bbox_xyxy, confidences, class_ids  =self.object_detection.detect(input_image,imgsize=self.default_params["image_resolution"])
 
 
 
@@ -331,7 +335,7 @@ if __name__=='__main__':
     seed = 42                     # 随机种子（用于结果可复现）
     eta = 0.0                     # DDIM采样器的eta参数
 
-    img=cv2.imread('test_imgs\man.png')
+    img=cv2.imread('test_imgs\old.png')
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     attack = ADV_ATTACK(device=torch.device("cuda"),model_path_object_detection='./models/yolo11n.pt')
