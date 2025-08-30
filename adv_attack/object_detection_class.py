@@ -39,26 +39,62 @@ class ObjectDetection:
 
 
 
-    def detect(self,img,imgsize=320):
-        # 默认输入是RGB，8位，0-255
-        if  "yolo" in self.model_type :
-            img = img[..., [2, 1, 0]]
-        if img.ndim == 4:
+#     def detect(self,img,imgsize=320):
+#         # 默认输入是RGB，8位，0-255
+#         if  "yolo" in self.model_type :
+#             img = img[..., [2, 1, 0]]
+#         if img.ndim == 4:
             
-            img=img[0]
-        if  "yolo" in self.model_type :
-            results=self.model(np.ascontiguousarray(img),imgsz=imgsize)
+#             img=img[0]
+#         if  "yolo" in self.model_type :
+#             results=self.model(np.ascontiguousarray(img),imgsz=imgsize)
+#         else:
+#             raise ValueError("Unsupported model type")
+#         bbox_xyxy = []
+#         confidences = []
+#         class_ids = []  
+#         for result in results:
+#             bbox_xyxy.append(result.boxes.xyxy.numpy() if result.boxes.xyxy.device == torch.device("cpu") else result.boxes.xyxy.cpu().numpy())  # 转换为NumPy数组
+#             confidences.append(result.boxes.conf.numpy() if result.boxes.conf.device == torch.device("cpu") else result.boxes.conf.cpu().numpy())   
+#             class_ids.append(result.boxes.cls.numpy().astype(int) if result.boxes.cls.device == torch.device("cpu") else result.boxes.cls.cpu().numpy().astype(int))
+#             result.save(filename=f"detection_result_{class_ids[0]}.jpg")
+#         return bbox_xyxy, confidences, class_ids                                 
+
+
+
+    def detect(self, img, imgsize=320):
+        # 默认输入是RGB，8位，0-255
+        if "yolo" in self.model_type:
+            img = img[..., [2, 1, 0]]  # BGR转RGB（YOLO通常期望BGR输入）
+        
+        if img.ndim == 4:
+            img = img[0]  # 处理批量输入，取第一张图
+        
+        # 确保输入是PyTorch张量并在正确设备上
+        if isinstance(img, np.ndarray):
+            img = torch.from_numpy(img).to(self.device).float() / 255.0  # 归一化到0-1
+            # 调整维度：(H, W, C) -> (1, C, H, W)（YOLO需要的输入格式）
+            img = img.permute(2, 0, 1).unsqueeze(0)
+        
+        # 模型推理
+        if "yolo" in self.model_type:
+            # 对于Ultralytics YOLO，使用device参数确保在正确设备上运行
+            results = self.model(img, imgsz=imgsize, device=self.device)
         else:
             raise ValueError("Unsupported model type")
+        
+        # 提取结果并保持为PyTorch张量（不转换为NumPy）
         bbox_xyxy = []
         confidences = []
-        class_ids = []  
+        class_ids = []
+        
         for result in results:
-            bbox_xyxy.append(result.boxes.xyxy.numpy() if result.boxes.xyxy.device == torch.device("cpu") else result.boxes.xyxy.cpu().numpy())  # 转换为NumPy数组
-            confidences.append(result.boxes.conf.numpy() if result.boxes.conf.device == torch.device("cpu") else result.boxes.conf.cpu().numpy())   
-            class_ids.append(result.boxes.cls.numpy().astype(int) if result.boxes.cls.device == torch.device("cpu") else result.boxes.cls.cpu().numpy().astype(int))
-            result.save(filename=f"detection_result_{class_ids[0]}.jpg")
-        return bbox_xyxy, confidences, class_ids                                 
-
-
-
+            # 直接获取PyTorch张量，不转换为NumPy
+            bbox_xyxy.append(result.boxes.xyxy.to(self.device))  # 边界框
+            confidences.append(result.boxes.conf.to(self.device))  # 置信度
+            class_ids.append(result.boxes.cls.to(self.device).long())  # 类别ID（转为长整数）
+            
+            # 保存结果（可选）
+            result.save(filename=f"detection_result.jpg")
+        
+        return bbox_xyxy, confidences, class_ids

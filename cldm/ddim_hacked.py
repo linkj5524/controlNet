@@ -304,7 +304,7 @@ class DDIMSampler(object):
         return x_next, out
 
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def encode_return_all(self, x0, c, t_enc, use_original_steps=False, return_intermediates=None,
                unconditional_guidance_scale=1.0, unconditional_conditioning=None, callback=None):
         timesteps = np.arange(self.ddpm_num_timesteps) if use_original_steps else self.ddim_timesteps
