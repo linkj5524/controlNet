@@ -70,8 +70,8 @@ class ADV_ATTACK:
             "a_prompt": "",
             "n_prompt": "",
             "num_samples": 1,
-            "image_resolution": 512,
-            "ddim_steps": 50,
+            "image_resolution": 256,
+            "ddim_steps": 5,
             "guess_mode": False,
             "strength": 1.0,
             "scale": 9.0,
@@ -126,8 +126,9 @@ class ADV_ATTACK:
 
         # 预处理图像
         ## 确保图像通道正常,对图像的size有要求，不能随便的大小
-        input_image=HWC3(input_image)
-        input_image = cv2.resize(input_image, (self.default_params["image_resolution"],self.default_params["image_resolution"]))
+        # 确保是三个通道的numpy，int8类型
+        input_image=HWC3(input_image) ## input_image RGB
+        input_image = cv2.resize(input_image, (self.default_params["image_resolution"],self.default_params["image_resolution"])) # input_image RGB
 
         ## 处理控制图像，并返回边缘图和边缘的control
         self.edge_image,self.control=self.generate_edge_control_from_image(input_image)
@@ -167,54 +168,75 @@ class ADV_ATTACK:
         )  # Magic number. IDK why
         
         #对图像进行编码，转换为latent
-        temp_tensor=self.to_tensor_from_image(input_image)
-        latent=self.img_to_latent(temp_tensor)
+        temp_tensor=self.to_imgTensor_from_image(input_image)
+        latent_input=self.imgTensor_to_latent(temp_tensor)
 
         # 设置采样参数
         self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
         # 使用封装的ddim进行逆采样
-        ## x_next 表示逆采样的结果（噪声最大的latent），out 表示所有的中间结果
+        ## latent_start 表示逆采样的结果（噪声最大的latent），out 表示所有的中间结果
+        with torch.no_grad():
+            latent_start,out=self.ddim_sampler.encode_return_all(x0=latent_input, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
+            unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
 
-        bbox_xyxy, confidences, class_ids_gt  =self.object_detection.detect(input_image,imgsize=self.default_params["image_resolution"])
-        class_ids_gt_tensor = torch.tensor(class_ids_gt, dtype=torch.long, device=latent.device)
-        confidences_gt_tensor = torch.tensor(confidences, dtype=torch.float, device=latent.device)
-        # require grad
-        latent.requires_grad = True
-        optimizer = torch.optim.Adam([latent], lr=1e-3)
-        cross_entro_loss = torch.nn.CrossEntropyLoss()
-        print("输入模型前的x_next.requires_grad：", latent.requires_grad)  # 必须为 True
-        print("输入模型前的x_next.grad_fn：", latent.grad_fn)   
-        for epoch in range(params["optim_epochs"]):
+        # 获取目标检测模型的输出，也可以直接传入这些已知的信息
+        bbox_xyxy, confidences, class_ids_gt  =self.object_detection.detect(input_image,imgsize=self.default_params["image_resolution"],file_path='result1.jpg')
+        class_ids_gt_tensor = torch.tensor(class_ids_gt, dtype=torch.long, device=latent_input.device) # self.device
+        confidences_gt_tensor = torch.tensor(confidences, dtype=torch.float, device=latent_input.device)
+        
+
+
+        
+        # 采样过程实现
+        # t_start=self.ddim_sampler.ddim_timesteps[-1]
+        # # 得到最终的latent
+        # end_latent=self.ddim_sampler.decode(  latent_start, cond, t_start, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
+        #        use_original_steps=False, callback=None)
+
+
+
+
+        # # # 调试
+        # # temp=out['intermediates'][0]
+        # image_temp=self.latent_to_img(end_latent)
+        
+        # bbox_xyxy, confidences, class_ids_gt  =self.object_detection.detect(image_temp,imgsize=self.default_params["image_resolution"],file_path='result2.jpg')
+        # class_ids_gt_tensor = torch.tensor(class_ids_gt, dtype=torch.long, device=latent_input.device) # self.device
+        # confidences_gt_tensor = torch.tensor(confidences, dtype=torch.float, device=latent_input.device)
+
+        # # require grad
+        # latent_start.requires_grad = True
+        # optimizer = torch.optim.Adam([latent_start], lr=1e-3)
+        # cross_entro_loss = torch.nn.CrossEntropyLoss()
+        # print("输入模型前的x_next.requires_grad：", latent_start.requires_grad)  # 必须为 True
+        # print("输入模型前的x_next.grad_fn：", latent_start.grad_fn)   
+        # for epoch in range(params["optim_epochs"]):
             
 
 
 
-            x_next, out=self.ddim_sampler.encode_return_all(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
-             unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
 
-            print("输入模型前的x_next.requires_grad：", x_next.requires_grad)  # 必须为 True
-            print("输入模型前的x_next.grad_fn：", x_next.grad_fn)   
 
-            image=self.latent_to_img(x_next)
-            print("输入模型前的image.requires_grad：", image.requires_grad)  # 必须为 True
-            print("输入模型前的image.grad_fn：", image.grad_fn)   
-            bbox_xyxy, confidences, class_ids  =self.object_detection.detect(image,imgsize=self.default_params["image_resolution"])
-            print("输入模型前的confidences.confidences", confidences.requires_grad)  # 必须为 True
-            print("输入模型前的confidences.grad_fn：", confidences.grad_fn)   
+        #     # image=self.latent_to_img(x_next)
+        #     print("输入模型前的image.requires_grad：", image.requires_grad)  # 必须为 True
+        #     print("输入模型前的image.grad_fn：", image.grad_fn)   
+        #     bbox_xyxy, confidences, class_ids  =self.object_detection.detect(image,imgsize=self.default_params["image_resolution"])
+        #     print("输入模型前的confidences.confidences", confidences.requires_grad)  # 必须为 True
+        #     print("输入模型前的confidences.grad_fn：", confidences.grad_fn)   
 
-            # 计算检测的损失
-            class_ids_tensor = torch.tensor(class_ids, dtype=torch.long, device=x_next.device)
-            confidences_tensor = torch.tensor(confidences, dtype=torch.float, device=x_next.device)
-            loss = cross_entro_loss(confidences_tensor, confidences_gt_tensor)
-            optimizer.zero_grad()
-            (-loss).backward()
-            optimizer.step()
+        #     # 计算检测的损失
+        #     class_ids_tensor = torch.tensor(class_ids, dtype=torch.long, device=x_next.device)
+        #     confidences_tensor = torch.tensor(confidences, dtype=torch.float, device=x_next.device)
+        #     loss = cross_entro_loss(confidences_tensor, confidences_gt_tensor)
+        #     optimizer.zero_grad()
+        #     (-loss).backward()
+        #     optimizer.step()
 
-        # 得到最终的对抗样本    
-        image=self.latent_to_img(x_next)
+        # # 得到最终的对抗样本    
+        # image=self.latent_to_img(x_next)
         
-        # 保存对抗样本
-        cv2.imwrite('result.png',image[0])
+        # # 保存对抗样本
+        # cv2.imwrite('result.png',image[0])
 
         # 保存中间结果
         # 对初始latent进行优化
@@ -233,7 +255,7 @@ class ADV_ATTACK:
         # x_next, out=self.ddim_sampler.encode_return_all(x0=latent, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
         #        unconditional_guidance_scale=9, unconditional_conditioning=un_cond, callback=None)
         # 初始图片的推理结果
-        bbox_xyxy, confidences, class_ids  =self.object_detection.detect(input_image,imgsize=self.default_params["image_resolution"])
+        # bbox_xyxy, confidences, class_ids  =self.object_detection.detect(input_image,imgsize=self.default_params["image_resolution"])
 
 
 
@@ -264,7 +286,7 @@ class ADV_ATTACK:
         # cv2.imwrite('result1.png',images[0])
         
         return 
-    def to_tensor_from_image(self, image):
+    def to_imgTensor_from_image(self, image):
 
 
         # 转换到-1到1
@@ -305,7 +327,7 @@ class ADV_ATTACK:
         return detected_map,control
     
     # 将图片转化为latent
-    def img_to_latent(self, img):
+    def imgTensor_to_latent(self, img):
         '''
         img:[0-1],type:tensor
         return: latent, type:tensor
@@ -321,11 +343,19 @@ class ADV_ATTACK:
             z = posterior.mode()    # 取均值（确定性结果，推荐用于推理）
         z=z.to(self.device)
         return z   
+    # def latent_to_img(self,latent):
+    #     img = self.model.first_stage_model.decode(latent)
+    #     return  (einops.rearrange(img, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+
     def latent_to_img(self,latent):
         img = self.model.first_stage_model.decode(latent)
-        return  (einops.rearrange(img, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-
-
+        img = (img * 127.5 + 127.5).to(dtype=torch.float32)
+    
+        # # 确保与YOLO模型在同一设备
+        # img = img.to(self.yolo_model.device)  # 假设self.yolo_model是加载的YOLO模型
+        
+        return img
+        # return  (einops.rearrange(img, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
 
 
 
@@ -379,9 +409,11 @@ if __name__=='__main__':
     scale = 9.0                   # 引导系数
     seed = 42                     # 随机种子（用于结果可复现）
     eta = 0.0                     # DDIM采样器的eta参数
-
-    img=cv2.imread('test_imgs\old.png')
+    path=os.path.join(os.path.dirname(__file__), "..")
+    img_path=os.path.join(os.path.join(path,'test_imgs'),'old.png')
+    img=cv2.imread(img_path)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    attack = ADV_ATTACK(device=torch.device("cuda"),model_path_object_detection='./models/yolo11n.pt')
+    model_path=os.path.join(os.path.join(path,'models'),'yolo11n.pt')
+    attack = ADV_ATTACK(device=torch.device("cuda"),model_path_object_detection=model_path)
+    #默认输入是RBG格式
     attack.generate_adversarial_example(img)

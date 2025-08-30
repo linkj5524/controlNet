@@ -62,20 +62,26 @@ class ObjectDetection:
 
 
 
-    def detect(self, img, imgsize=320):
-        # 默认输入是RGB，8位，0-255
+    def detect(self, img, imgsize=320,file_path=None):
+        # 输入的图像默认是RGB
         if "yolo" in self.model_type:
-            img = img[..., [2, 1, 0]]  # BGR转RGB（YOLO通常期望BGR输入）
-        
-        if img.ndim == 4:
-            img = img[0]  # 处理批量输入，取第一张图
-        
-        # 确保输入是PyTorch张量并在正确设备上
-        if isinstance(img, np.ndarray):
-            img = torch.from_numpy(img).to(self.device).float() / 255.0  # 归一化到0-1
-            # 调整维度：(H, W, C) -> (1, C, H, W)（YOLO需要的输入格式）
-            img = img.permute(2, 0, 1).unsqueeze(0)
-        
+            if isinstance(img, np.ndarray) :
+                # 默认输入是RGB，8位，0-255
+                # img = img[..., [2, 1, 0]]  # RGB转BGR（YOLO通常期望BGR输入）
+            
+                if img.ndim == 4:
+                    img = img[0]  # 处理批量输入，取第一张图
+                
+                # 确保输入是PyTorch张量并在正确设备上
+
+                img = torch.from_numpy(img).to(self.device).float() / 255.0  # 归一化到0-1
+                # 调整维度：(H, W, C) -> (1, C, H, W)（YOLO需要的输入格式）
+                img = img.permute(2, 0, 1).unsqueeze(0)
+            elif isinstance(img,  torch.Tensor) :
+                img=img
+            else:
+                raise ValueError("Unsupported input type")
+
         # 模型推理
         if "yolo" in self.model_type:
             # 对于Ultralytics YOLO，使用device参数确保在正确设备上运行
@@ -94,7 +100,16 @@ class ObjectDetection:
             confidences.append(result.boxes.conf.to(self.device))  # 置信度
             class_ids.append(result.boxes.cls.to(self.device).long())  # 类别ID（转为长整数）
             
+            # 将结果绘制到原始图像上
+            annotated_img = result.plot()
+            
+            # 转换回BGR格式用于OpenCV显示
+            annotated_img = cv2.cvtColor(annotated_img, cv2.COLOR_RGB2BGR)
             # 保存结果（可选）
-            result.save(filename=f"detection_result.jpg")
+            if file_path is not None:
+
+                cv2.imwrite(file_path, annotated_img)
+            else:
+                raise ValueError("Unsupported input type")
         
         return bbox_xyxy, confidences, class_ids
