@@ -52,7 +52,7 @@ class ObjectDetection:
             raise ValueError("Unsupported model type")
         bbox_xyxy = []
         confidences = []
-        class_ids = []
+        class_ids = []  
         for result in results:
             bbox_xyxy.append(result.boxes.xyxy.numpy() if result.boxes.xyxy.device == torch.device("cpu") else result.boxes.xyxy.cpu().numpy())  # 转换为NumPy数组
             confidences.append(result.boxes.conf.numpy() if result.boxes.conf.device == torch.device("cpu") else result.boxes.conf.cpu().numpy())   
