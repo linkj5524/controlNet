@@ -180,10 +180,56 @@ class ADV_ATTACK:
             unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
 
         # 获取目标检测模型的输出，也可以直接传入这些已知的信息
-        bbox_xyxy, confidences, class_ids_gt  =self.object_detection.detect(input_image,imgsize=self.default_params["image_resolution"],file_path='result1.jpg')
-        class_ids_gt_tensor = torch.tensor(class_ids_gt, dtype=torch.long, device=latent_input.device) # self.device
-        confidences_gt_tensor = torch.tensor(confidences, dtype=torch.float, device=latent_input.device)
+        result_gt =self.object_detection.detect(input_image,file_path='result1.jpg',grad_status=True)
         
+        #         'box': (x1, y1, x2, y2),  # 原始图像坐标，张量形式
+        # 'confidence': confidences[i],  # 张量形式的置信度 
+        # 'class_id': classes[i],  # 张量形式的类别ID
+        # 'class_name': self.names[int(classes[i].item())]  # 类别名称
+        
+
+
+        # 保存中间结果
+        # 对初始latent进行优化
+        # 需要 1. 优化目标 2. 优化器 3. 优化参数 4. 后处理函数
+        # 优化目标：目标检测模型的输出与原始的检测框，类别等的差值
+        # 优化器：Adam
+        # 优化参数：latent
+        # 后处理函数，根据检测模型的输出，得到结果，并进行优化
+        
+
+
+        # require grad
+        #断开，减少内存消耗
+        latent_start=latent_start.detach().clone()
+        latent_start.requires_grad = True
+        optimizer = torch.optim.Adam([latent_start], lr=1e-3)
+        cross_entro_loss = torch.nn.CrossEntropyLoss()
+  
+        #开始步骤
+        t_start=self.ddim_sampler.ddim_timesteps[-1]
+        for epoch in range(params["optim_epochs"]):
+            # 循环，优化
+            end_latent=self.ddim_sampler.decode(  latent_start, cond, t_start, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
+                use_original_steps=False, callback=None)
+
+
+
+            # 转换成图片
+            image=self.latent_to_img(end_latent)
+
+            print("image.requires_grad：", image.requires_grad)  
+            print("image.grad_fn：", image.grad_fn)   
+            # 目标检测模型的输出
+            result  =self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
+            result
+            # loss = cross_entro_loss(confidences, confidences_gt)
+            # optimizer.zero_grad()
+            # (-loss).backward()
+            # optimizer.step()
+
+
+
 
 
         
@@ -349,7 +395,8 @@ class ADV_ATTACK:
 
     def latent_to_img(self,latent):
         img = self.model.first_stage_model.decode(latent)
-        img = (img * 127.5 + 127.5).to(dtype=torch.float32)
+        # sd 对应的区间为-1到1，需要转换到0到1
+        img = ((img + 1)*0.5 ).to(dtype=torch.float32)
     
         # # 确保与YOLO模型在同一设备
         # img = img.to(self.yolo_model.device)  # 假设self.yolo_model是加载的YOLO模型
