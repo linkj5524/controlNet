@@ -22,6 +22,7 @@ from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
 from object_detection_class import ObjectDetection
 
+from adv_attack.util import *
 
 
 
@@ -66,19 +67,19 @@ class ADV_ATTACK:
             self.default_params = kwargs
         else:
             self.default_params = {
-            "prompt": "a handsome boy with a long hair",
+            "prompt": "Modify the texture of the clothing in the image to a pattern ",
             "a_prompt": "",
             "n_prompt": "",
             "num_samples": 1,
             "image_resolution": 256,
             "ddim_steps": 5,
-            "guess_mode": False,
+            "guess_mode": True,
             "strength": 1.0,
             "scale": 9.0,
             "seed": 42,
             "eta": 0.0,
             "save_memory": True,
-            "optim_epochs":10
+            "optim_epochs":50
         }
     
 
@@ -182,11 +183,6 @@ class ADV_ATTACK:
         # 获取目标检测模型的输出，也可以直接传入这些已知的信息
         result_gt =self.object_detection.detect(input_image,file_path='result1.jpg',grad_status=True)
         
-        #         'box': (x1, y1, x2, y2),  # 原始图像坐标，张量形式
-        # 'confidence': confidences[i],  # 张量形式的置信度 
-        # 'class_id': classes[i],  # 张量形式的类别ID
-        # 'class_name': self.names[int(classes[i].item())]  # 类别名称
-        
 
 
         # 保存中间结果
@@ -203,8 +199,8 @@ class ADV_ATTACK:
         #断开，减少内存消耗
         latent_start=latent_start.detach().clone()
         latent_start.requires_grad = True
-        optimizer = torch.optim.Adam([latent_start], lr=1e-3)
-        cross_entro_loss = torch.nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam([latent_start], lr=5e-2)
+        cross_entro_loss = YOLOv11DetectionLoss()
   
         #开始步骤
         t_start=self.ddim_sampler.ddim_timesteps[-1]
@@ -217,16 +213,24 @@ class ADV_ATTACK:
 
             # 转换成图片
             image=self.latent_to_img(end_latent)
-
-            print("image.requires_grad：", image.requires_grad)  
-            print("image.grad_fn：", image.grad_fn)   
+ 
+ 
             # 目标检测模型的输出
             result  =self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
-            result
-            # loss = cross_entro_loss(confidences, confidences_gt)
-            # optimizer.zero_grad()
-            # (-loss).backward()
-            # optimizer.step()
+            print(result)
+            loss ,loss_dict= cross_entro_loss(result, result_gt)
+            print(f"total_loss:{loss}")
+            optimizer.zero_grad()
+            (-loss_dict['class_loss']).backward()
+            optimizer.step()
+            # 手动清理变量，帮助GC回收内存
+
+
+        # 得到最终的对抗样本    
+        image_tensor=self.latent_to_img(end_latent)
+        image=self.tensor_01_to_numpy_255(image_tensor)
+        # 保存对抗样本
+        cv2.imwrite('result_adv_attack.png',image)
 
 
 
@@ -405,6 +409,49 @@ class ADV_ATTACK:
         # return  (einops.rearrange(img, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
 
 
+    def tensor_01_to_numpy_255(self,tensor, is_rgb=True):
+        """
+        将模型输出的0-1范围图像张量转换为0-255范围numpy数组，并调整通道顺序
+        
+        Args:
+            tensor: 模型输出的图像张量，格式为 [B, C, H, W] 或 [C, H, W]（单张图像）
+                    数值范围必须是 [0, 1]，通道数通常为1（灰度）或3（RGB/BGR）
+            is_rgb: 若为True，默认输入通道为RGB（无需额外转换）；
+                    若为False，会将RGB转为BGR（适配opencv的默认通道顺序）
+        
+        Returns:
+            numpy_array: 转换后的numpy数组，格式为 [B, H, W, C] 或 [H, W, C]（单张图像）
+                        数值范围 [0, 255]，数据类型 uint8
+        """
+        # -------------------------- 1. 处理单张图像（无批量维度） --------------------------
+        if tensor.dim() == 3:  # 输入为 [C, H, W]（单张图像），添加批量维度变为 [1, C, H, W]
+            tensor = tensor.unsqueeze(0)
+        
+
+        # -------------------------- 2. 设备迁移 + 张量转numpy --------------------------
+        # 推理阶段用 .detach() 切断梯度，训练阶段若需保留梯度可移除（但通常图像转换用于推理）
+        if tensor.is_cuda:
+            tensor = tensor.cpu()  # 移到CPU（numpy不支持CUDA数据）
+        np_array = tensor.detach().numpy()  # 张量 → numpy数组，格式 [B, C, H, W]
+
+        # -------------------------- 3. 0-1 → 0-255 缩放 + 数据类型转换 --------------------------
+        # 乘以255后用np.clip确保数值在0-255（避免浮点误差导致的超界，如1.0001→255.025）
+        np_array = np.clip(np_array * 255.0, a_min=0, a_max=255)
+        # 转为uint8（图像标准类型，减少内存占用）
+        np_array = np_array.astype(np.uint8)
+
+        # -------------------------- 4. 通道重排：[B, C, H, W] → [B, H, W, C] --------------------------
+        np_array = np.transpose(np_array, axes=(0, 2, 3, 1))  # 调整维度顺序
+
+        # -------------------------- 5. （可选）RGB → BGR（适配opencv） --------------------------
+        if is_rgb and np_array.shape[-1] == 3:  # 仅当通道数为3（彩色图）时转换
+            np_array = np_array[..., ::-1]  # 最后一个通道反转：RGB → BGR
+
+        # -------------------------- 6. 移除批量维度（若输入为单张图像） --------------------------
+        if np_array.shape[0] == 1:
+            np_array = np_array.squeeze(0)  # 从 [1, H, W, C] 变为 [H, W, C]
+
+        return np_array
 
 
 

@@ -105,6 +105,7 @@ class ObjectDetection:
 
 
                     results = self._decode_yolo_output(out)
+                    
             else:
                 #抛出异常
                 raise ValueError("Unsupported model type for postprocess")
@@ -122,7 +123,58 @@ class ObjectDetection:
         
         return results
     
+    def detect_return_dict(self, img,file_path=None,grad_status=False):
+        # 输入的图像默认是RGB
+        # 确保输入符合要求
+        if "yolo" in self.model_type:
+            if isinstance(img, np.ndarray) :
+                # 默认输入是RGB，8位，0-255
+                # img = img[..., [2, 1, 0]]  # RGB转BGR（YOLO通常期望BGR输入）
+            
+                if img.ndim == 4:
+                    img = img[0]  # 处理批量输入，取第一张图
+                
+                # 确保输入是PyTorch张量并在正确设备上
 
+                img = torch.from_numpy(img).to(self.device).float() / 255.0  # 归一化到0-1
+                # 调整维度：(H, W, C) -> (1, C, H, W)（YOLO需要的输入格式）
+                img_tensor = img.permute(2, 0, 1).unsqueeze(0)
+            elif isinstance(img,  torch.Tensor) :
+                img_tensor=img
+            else:
+                raise ValueError("Unsupported input type")
+
+        # 模型推理
+        if "yolo" in self.model_type:
+            if self.model_type == "yolov11":
+                # 不同模型需要调用不同的postprocess函数
+                # 对于Ultralytics YOLO，使用device参数确保在正确设备上运行
+                with torch.set_grad_enabled(grad_status):  # 开启梯度信息
+                    infer_results = self.model(img_tensor)  # 推理
+                    # 后处理
+                    # 计算tensor的尺寸
+                    out = infer_results[0]  # 取第一个元素
+                    out = out.permute(0, 2, 1).contiguous()  # [B,N,84]
+                    width, height = img_tensor.shape[-1], img_tensor.shape[-2]
+
+
+                    results = self._decode_yolo_output(out)
+            else:
+                #抛出异常
+                raise ValueError("Unsupported model type for postprocess")
+
+
+
+
+        else:
+            raise ValueError("Unsupported model type")
+        
+        # 保存结果
+        if file_path is not None:
+            
+            self.visualize_detections(img_tensor, results, save_path=file_path)
+        
+        return results
 
 
 
@@ -218,8 +270,8 @@ class ObjectDetection:
         
         return boxes, obj_conf, cls_conf
 
-    # 解析YOLOv11模型输出，anchor free 版本
 
+    # 解析YOLOv11模型输出，anchor free 版本
     def _decode_yolo_output(self, raw_outs):
         """
         解析 YOLOv11 模型输出，返回 tensor 而非列表
@@ -322,7 +374,7 @@ class ObjectDetection:
             
             # 绘制标签
             text = f"{class_name}: {confidence:.2f}"
-            cv2.putText(img, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0], 2)
+            cv2.putText(img, text, (x1, y1+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0], 2)
         # 保存结果
         if save_path is not None:
             try:
