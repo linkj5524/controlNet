@@ -58,7 +58,7 @@ class DDIMSampler(object):
     
     
     '''
-    @torch.no_grad()
+ 
     def sample(self,
                S,
                batch_size,
@@ -131,15 +131,14 @@ class DDIMSampler(object):
     采样过程的核心过程，根据步长等信息，实现采样
     
     '''
-    @torch.no_grad()
     def ddim_sampling(self, cond, shape,
                       x_T=None, ddim_use_original_steps=False,
                       callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, log_every_t=100,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None, dynamic_threshold=None,
-                      ucg_schedule=None):
-        device = self.model.betas.device
+                      ucg_schedule=None,device=torch.device("cuda")):
+        # device = self.model.betas.device
         b = shape[0]
         #x_T:初始噪声，如果没有输入，则随机初始化
         if x_T is None:
@@ -205,9 +204,18 @@ class DDIMSampler(object):
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
             model_output = self.model.apply_model(x, t, c)
         else:
-            model_t = self.model.apply_model(x, t, c)
-            model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
-            model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
+            # model_t = self.model.apply_model(x, t, c)
+            # model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
+
+            
+            # model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
+
+            e_t_uncond, noise_pred = torch.chunk(
+                self.model.apply_model(torch.cat((x, x)), torch.cat((t, t)),
+                                        concat_dicts(unconditional_conditioning, c)), 2)
+            model_output = e_t_uncond + unconditional_guidance_scale * (noise_pred - e_t_uncond)
+
+
         # 模型的参数化方法，如果模型预测的是速度项，需要转换成噪声
         if self.model.parameterization == "v":
             e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)

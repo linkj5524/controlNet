@@ -672,6 +672,12 @@ class LatentDiffusion(DDPM):
         return self.scale_factor * z
 
     def get_learned_conditioning(self, c):
+                # 先获取模型所在设备
+        # model_device = next(self.cond_stage_model.parameters()).device
+        
+        # # 输入前先检查并移动到模型所在设备
+        # if c.device != model_device:
+        #     c = c.to(model_device)
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
                 c = self.cond_stage_model.encode(c)

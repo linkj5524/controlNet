@@ -95,7 +95,7 @@ if __name__=='__main__':
     # 设置参数
     num_samples = 2               # 生成图像数量
     image_resolution = 512        # 图像分辨率
-    ddim_steps = 50               # 采样步数
+    ddim_steps = 5              # 采样步数
     guess_mode = False            # 是否使用猜测模式
     strength = 1.0                # 控制生成与输入的相似度
     scale = 9.0                   # 引导系数

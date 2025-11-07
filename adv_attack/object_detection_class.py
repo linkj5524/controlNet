@@ -340,7 +340,7 @@ class ObjectDetection:
 
     
     # visualize_detections函数，可视化检测结果
-    def visualize_detections(self, img_tensor, results,save_path):
+    def visualize_detections(self, img_tensor_input, results,save_path):
         """
         可视化检测结果  
         :param img: 原始图像
@@ -349,32 +349,36 @@ class ObjectDetection:
         :return: 可视化后的图像
         """
 
-        
+        img_tensor=img_tensor_input.detach()
         #将输入转化为cv2格式，从tensor转化为numyp格式
         if img_tensor.ndim == 4:
             img_tensor = img_tensor[0]  # 处理批量输入，取第一张图
         
-        img = img_tensor.mul(255).byte().permute(1, 2, 0).numpy()
+        img =np.clip( img_tensor.mul(255).permute(1, 2, 0).numpy(), 0, 255)
+        img = img.astype(np.uint8)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
         # 绘制边界框
         count=0
-        for index in range(len(results['boxes'])):
-            # 将tensor detach 断开
-            x1, y1, x2, y2 = results['boxes'][index][0].detach().cpu().numpy()
-            confidence = results['scores'][index][0].detach().cpu().numpy()
-            class_id = results['labels'][index][0].detach().cpu().numpy()
-            class_name = self.names[int(class_id)]
+        try:
+            for index in range(len(results['boxes'])):
+                # 将tensor detach 断开
+                x1, y1, x2, y2 = results['boxes'][index][0].detach().cpu().numpy()
+                confidence = results['scores'][index][0].detach().cpu().numpy()
+                class_id = results['labels'][index][0].detach().cpu().numpy()
+                class_name = self.names[int(class_id)]
 
-            
-            # 绘制边界框
-            # 坐标转换为整数
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            cv2.rectangle(img, (x1, y1), (x2, y2), [0, 255, 0], 2)
-            
-            # 绘制标签
-            text = f"{class_name}: {confidence:.2f}"
-            cv2.putText(img, text, (x1, y1+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0], 2)
+                
+                # 绘制边界框
+                # 坐标转换为整数
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                cv2.rectangle(img, (x1, y1), (x2, y2), [0, 255, 0], 2)
+                
+                # 绘制标签
+                text = f"{class_name}: {confidence:.2f}"
+                cv2.putText(img, text, (x1, y1+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0], 2)
+        except:
+            print("No detections found")
         # 保存结果
         if save_path is not None:
             try:
