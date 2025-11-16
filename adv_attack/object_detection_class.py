@@ -118,8 +118,12 @@ class ObjectDetection:
         
         # 保存结果
         if file_path is not None:
-            
-            self.visualize_detections(img_tensor, results, save_path=file_path)
+            # 判断results是否为空
+            if len(results) > 0:
+                self.visualize_detections(img_tensor, results, save_path=file_path)
+            else :
+                print("No detections found.")
+                return None
         
         return results
     
@@ -361,22 +365,23 @@ class ObjectDetection:
         # 绘制边界框
         count=0
         try:
-            for index in range(len(results['boxes'])):
+            for batch in range(len(results['boxes'])):
+                for index in range(len(results['boxes'][batch])):
                 # 将tensor detach 断开
-                x1, y1, x2, y2 = results['boxes'][index][0].detach().cpu().numpy()
-                confidence = results['scores'][index][0].detach().cpu().numpy()
-                class_id = results['labels'][index][0].detach().cpu().numpy()
-                class_name = self.names[int(class_id)]
+                    x1, y1, x2, y2 = results['boxes'][batch][index].detach().cpu().numpy()
+                    confidence = results['scores'][batch][index].detach().cpu().numpy()
+                    class_id = results['labels'][batch][index].detach().cpu().numpy()
+                    class_name = self.names[int(class_id)]
 
-                
-                # 绘制边界框
-                # 坐标转换为整数
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                cv2.rectangle(img, (x1, y1), (x2, y2), [0, 255, 0], 2)
-                
-                # 绘制标签
-                text = f"{class_name}: {confidence:.2f}"
-                cv2.putText(img, text, (x1, y1+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0], 2)
+                    
+                    # 绘制边界框
+                    # 坐标转换为整数
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), [0, 255, 0], 2)
+                    
+                    # 绘制标签
+                    text = f"{class_name}: {confidence:.2f}"
+                    cv2.putText(img, text, (x1, y1+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0], 2)
         except:
             print("No detections found")
         # 保存结果

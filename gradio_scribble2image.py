@@ -42,6 +42,9 @@ def process(input_image, prompt, a_prompt, n_prompt, num_samples, image_resoluti
 
         if config.save_memory:
             model.low_vram_shift(is_diffusing=False)
+        # 保存controltensor
+        torch.save(control, 'control_good.pt')
+
         # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + a_prompt] * num_samples)]}
         un_cond = {"c_concat": None if guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([n_prompt] * num_samples)]}
@@ -95,7 +98,7 @@ if __name__=='__main__':
     # 设置参数
     num_samples = 2               # 生成图像数量
     image_resolution = 512        # 图像分辨率
-    ddim_steps = 5              # 采样步数
+    ddim_steps = 10              # 采样步数
     guess_mode = False            # 是否使用猜测模式
     strength = 1.0                # 控制生成与输入的相似度
     scale = 9.0                   # 引导系数
