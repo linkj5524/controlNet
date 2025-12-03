@@ -1,8 +1,13 @@
+import os
+import re
+import cv2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.ops import generalized_box_iou  # GIoU计算工具
-
+import torchvision.transforms as transforms
+import numpy as np
+from PIL import Image
 # 纯PyTorch实现的匈牙利算法（无改动，确保不依赖外部库）
 # def hungarian_matching(cost_matrix):
 #     """
@@ -386,7 +391,7 @@ class YOLOv11DetectionLoss(nn.Module):
         Returns:
             total_loss: 总损失（标量）
             loss_dict: 各任务损失明细（dict of 标量）
-        """
+        """   
         # 确定设备
         if len(pred_result['boxes']) == 0 or (len(pred_result['boxes']) > 0 and pred_result['boxes'][0].numel() == 0):
             device = torch.device('cpu')
@@ -510,3 +515,308 @@ class YOLOv11DetectionLoss(nn.Module):
         }
 
         return total_loss, loss_dict
+    
+
+
+class TVLoss(nn.Module):
+    """
+    总变分损失（Total Variation Loss）
+    用于衡量图像的平滑度，惩罚相邻像素间的剧烈变化
+    """
+    def __init__(self, tv_loss_weight=1.0):
+        super(TVLoss, self).__init__()
+        self.tv_loss_weight = tv_loss_weight
+
+    def forward(self, x):
+        """
+        计算TV损失
+        Args:
+            x: 输入张量，形状为 [batch_size, channels, height, width]
+        Returns:
+            tv_loss: 总变分损失值
+        """
+        # 计算水平方向的差异（相邻列像素差的L1范数）
+        batch_size = x.size()[0]
+        h_x = x.size()[2]
+        w_x = x.size()[3]
+        
+        # 水平方向：x[:, :, :, 1:] - x[:, :, :, :-1]
+        count_h = self.tensor_size(x[:, :, :, 1:])
+        h_tv = torch.pow((x[:, :, :, 1:] - x[:, :, :, :-1]), 2).sum()
+        
+        # 垂直方向：x[:, :, 1:, :] - x[:, :, :-1, :]
+        count_w = self.tensor_size(x[:, :, 1:, :])
+        w_tv = torch.pow((x[:, :, 1:, :] - x[:, :, :-1, :]), 2).sum()
+        
+        # 总变分损失 = 水平损失 + 垂直损失
+        tv_loss = self.tv_loss_weight * 2 * (h_tv / count_h + w_tv / count_w) / batch_size
+        return tv_loss
+
+    @staticmethod
+    def tensor_size(t):
+        """计算张量中元素的数量（除batch维度外）"""
+        return t.size()[1] * t.size()[2] * t.size()[3]
+    
+
+
+
+
+def tensor2picture(tensor, save_path, data_range="auto", use_opencv=False):
+    """
+    将 Tensor 保存为图像文件
+    
+    参数:
+        tensor: PyTorch Tensor 或 TensorFlow Tensor
+            形状要求: 
+                - PyTorch: (B, C, H, W) 或 (C, H, W)（B为批量，C为通道）
+                - TensorFlow: (B, H, W, C) 或 (H, W, C)
+        save_path: str
+            图像保存路径（如 "output.png"）
+        data_range: str 或 tuple, 可选
+            输入张量的数据范围，默认为 "auto"（自动检测）：
+            - "auto": 自动将张量归一化到 [0, 255]
+            - (min_val, max_val): 手动指定范围，将其映射到 [0, 255]
+        use_opencv: bool, 可选
+            是否用 OpenCV 保存（默认用 PIL），OpenCV 会自动转换 RGB→BGR
+    """
+    # --------------------------
+    # 1. 处理 Tensor 维度（移除批量维度）
+    # --------------------------
+    if "torch" in str(type(tensor)).lower():  # PyTorch Tensor
+        # 移至 CPU 并转为 numpy
+        tensor = tensor.cpu().detach() if tensor.requires_grad else tensor.cpu()
+        img_np = tensor.numpy()
+        
+        # 移除批量维度（若有）
+        if img_np.ndim == 4:  # (B, C, H, W) → (C, H, W)
+            img_np = img_np.squeeze(0)
+        
+        # 调整通道顺序：(C, H, W) → (H, W, C)
+        if img_np.shape[0] in [1, 3]:  # 单通道/三通道
+            img_np = np.transpose(img_np, (1, 2, 0))
+    
+    elif "tensorflow" in str(type(tensor)).lower():  # TensorFlow Tensor
+        # 转为 numpy（TF 默认在 CPU，无需手动转移）
+        img_np = tensor.numpy()
+        
+        # 移除批量维度（若有）
+        if img_np.ndim == 4:  # (B, H, W, C) → (H, W, C)
+            img_np = img_np.squeeze(0)
+    
+    else:
+        raise TypeError("不支持的 tensor 类型，请使用 PyTorch 或 TensorFlow 张量")
+    
+    # --------------------------
+    # 2. 处理单通道图像（灰度图）
+    # --------------------------
+    if img_np.shape[-1] == 1:
+        img_np = img_np.squeeze(-1)  # 移除通道维度，变为 (H, W)
+    
+    # --------------------------
+    # 3. 数据范围映射到 [0, 255]
+    # --------------------------
+    if data_range == "auto":
+        min_val = img_np.min()
+        max_val = img_np.max()
+    else:
+        min_val, max_val = data_range
+    
+    # 防止除零（若所有值相同）
+    if max_val == min_val:
+        img_np = np.zeros_like(img_np, dtype=np.uint8)
+    else:
+        # 归一化到 [0, 1] 再映射到 [0, 255]
+        img_np = ((img_np - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+    
+    # --------------------------
+    # 4. 保存图像
+    # --------------------------
+    if use_opencv:
+        # OpenCV 保存 BGR 格式，若原是 RGB 需转换
+        if img_np.ndim == 3 and img_np.shape[-1] == 3:
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(save_path, img_np)
+    else:
+        # PIL 直接保存 RGB 格式
+        img = Image.fromarray(img_np)
+        img.save(save_path)
+
+
+def cv2_to_tensor(img: np.ndarray, normalize: bool = True) -> torch.Tensor:
+    """
+    将OpenCV读取的图像（H×W×C，BGR格式，uint8）转换为C×H×W格式的Tensor
+    
+    参数:
+        img: OpenCV读取的图像数组，形状为(H, W, C)，通道顺序为BGR，数据类型为uint8
+        normalize: 是否将像素值归一化到[0.0, 1.0]（默认True）
+    
+    返回:
+        tensor: 转换后的Tensor，形状为(C, H, W)，数据类型为float32
+                若输入为彩色图，通道顺序转为RGB；若为灰度图，保持单通道
+    """
+    # 检查输入是否为合法的图像数组
+    if not isinstance(img, np.ndarray) or img.ndim not in (2, 3):
+        raise ValueError("输入必须是OpenCV读取的2D（灰度图）或3D（彩色图）数组")
+    
+    # 处理彩色图（3通道）：BGR转RGB
+    if img.ndim == 3:
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    else:
+        # 灰度图（2通道）：保持不变，后续扩展为单通道
+        img_rgb = img
+    
+    # 转换为float32类型（避免uint8计算溢出）
+    img_float = img_rgb.astype(np.float32)
+    
+    # 归一化到[0.0, 1.0]（如果需要）
+    if normalize:
+        img_float /= 255.0
+    
+    # 维度重排：H×W×C → C×H×W
+    # 灰度图会从(H, W)变为(1, H, W)
+    tensor = torch.from_numpy(img_float).permute(2, 0, 1) if img.ndim == 3 else torch.from_numpy(img_float).unsqueeze(0)
+    
+    return tensor
+
+
+def scale_tensor_to_resolution(tensor, new_height, new_width, mode='bilinear'):
+    """
+    将图像Tensor（C×H×W）缩放到指定分辨率（new_height × new_width）
+    
+    参数:
+        tensor: 输入图像Tensor，形状为 (C, H, W)，数据类型为float32/float64
+        new_height: 目标高度（整数）
+        new_width: 目标宽度（整数）
+        mode: 插值方法，可选 'bilinear'（默认，双线性）、'nearest'（最近邻）、'bicubic'（双三次）
+    
+    返回:
+        scaled_tensor: 缩放后的Tensor，形状为 (C, new_height, new_width)
+    """
+    # 检查输入合法性
+    if tensor.dim() != 3:
+        raise ValueError(f"输入Tensor必须是3维 (C, H, W)，但得到 {tensor.dim()} 维")
+    if not isinstance(new_height, int) or not isinstance(new_width, int):
+        raise ValueError(f"目标分辨率（new_height, new_width）必须是整数，但得到 ({new_height}, {new_width})")
+    if new_height <= 0 or new_width <= 0:
+        raise ValueError(f"目标分辨率必须为正数， but得到 ({new_height}, {new_width})")
+    
+    # 增加batch维度（B=1），因为F.interpolate要求输入为4维 (B, C, H, W)
+    tensor_with_batch = tensor.unsqueeze(0)  # 形状变为 (1, C, H, W)
+    
+    # 执行缩放：按目标分辨率（new_height, new_width）插值
+    scaled = F.interpolate(
+        input=tensor_with_batch,
+        size=(new_height, new_width),  # 明确指定目标尺寸
+        mode=mode,
+        align_corners=False  # 默认为False，避免边缘扭曲
+    )
+    
+    # 去除batch维度，返回 (C, new_height, new_width)
+    return scaled.squeeze(0)
+
+
+
+
+def binarize_image_tensor(img, threshold=0.5):
+    """
+    对输入的张量图像（0-1范围）进行二值化，生成0.0/1.0的浮点型掩码（与输入形状一致，含三通道）。
+    逻辑：对每个像素取所有通道的最小值，小于阈值则为1.0，否则为0.0，最终扩展为与输入相同的通道数。
+    
+    参数：
+        img: 输入张量，形状支持 (B, C, H, W)、(C, H, W) 或 (H, W)，值范围 [0,1]
+        threshold: 阈值（默认0.5）
+    
+    返回：
+        mask: 二值化掩码，与输入形状相同（含通道数），值为0.0或1.0（浮点型）
+    """
+    # 确保输入是PyTorch张量
+    if not isinstance(img, torch.Tensor):
+        raise TypeError("输入必须是PyTorch张量")
+    
+    # 确定通道维度和输入通道数
+    if img.dim() == 4:  # (B, C, H, W)
+        channel_dim = 1
+        num_channels = img.size(channel_dim)  # 获取通道数 C
+    elif img.dim() == 3:  # (C, H, W)
+        channel_dim = 0
+        num_channels = img.size(channel_dim)  # 获取通道数 C
+    elif img.dim() == 2:  # (H, W) 单通道输入，默认输出3通道
+        channel_dim = -1
+        num_channels = 3  # 手动指定为3通道
+    else:
+        raise ValueError("输入张量维度必须为2、3或4")
+    
+    # 处理多通道：取每个像素的通道最小值
+    if channel_dim != -1:
+        img_min = torch.min(img, dim=channel_dim, keepdim=True)[0]  # 单通道 (B,1,H,W) 或 (1,H,W)
+    else:  # 单通道输入，直接增加通道维度
+        img_min = img.unsqueeze(0)  # (1, H, W)
+    
+    # 二值化：像素最小值 < 阈值 → 1.0，否则 → 0.0
+    mask_single = (img_min < threshold).float()  # 单通道掩码
+    
+    # 将单通道掩码复制为与输入相同的通道数（通常为3通道）
+    # 用repeat在通道维度复制，其他维度复制1次（保持不变）
+    if img.dim() == 4:
+        # 输入 (B,C,H,W) → 输出 (B,C,H,W)：在通道维度（dim=1）复制C次
+        mask = mask_single.repeat(1, num_channels, 1, 1)
+    elif img.dim() == 3:
+        # 输入 (C,H,W) → 输出 (C,H,W)：在通道维度（dim=0）复制C次
+        mask = mask_single.repeat(num_channels, 1, 1)
+    else:  # 输入 (H,W) → 输出 (3,H,W)
+        mask = mask_single.repeat(num_channels, 1, 1)  # 复制为3通道
+    
+    return mask
+
+
+
+def tensor_to_pil(image_tensor):
+    """Tensor转PIL Image（处理函数内部转换用）"""
+    if isinstance(image_tensor, torch.Tensor):
+        # 处理批量数据或单张图像
+        if len(image_tensor.shape) == 4:
+            image_tensor = image_tensor[0]
+        # 反归一化（0-1 → 0-255）
+        img_np = image_tensor.cpu().detach().numpy()
+        if img_np.max() <= 1.0:
+            img_np = (img_np * 255).astype(np.uint8)
+        # 通道顺序转换 [C, H, W] → [H, W, C]
+        if img_np.shape[0] in [1, 3]:
+            img_np = np.transpose(img_np, (1, 2, 0))
+        # 处理灰度图
+        if img_np.shape[-1] == 1:
+            img_np = np.squeeze(img_np, axis=-1)
+        return Image.fromarray(img_np)
+    raise TypeError(f"不支持的Tensor类型：{type(image_tensor)}")
+
+
+def generate_inpaint_prompt(original_caption, target_object="dog", background_desc=None):
+    """
+    根据图像描述生成消除目标的提示词
+    
+    Args:
+        original_caption: 图像的原始文本描述
+        target_object: 要消除的目标（如"dog"/"car"/"person"）
+        background_desc: 自定义背景描述（可选）
+    
+    Returns:
+        positive_prompt: 正面提示词（补全背景）
+        negative_prompt: 负面提示词（禁止生成目标）
+    """
+    # 从原始描述中提取背景信息
+    if not background_desc:
+        # 移除目标关键词，保留背景描述
+        background_desc = re.sub(rf"\b{target_object}\b.*?\b", "", original_caption, flags=re.IGNORECASE)
+        background_desc = background_desc.replace("  ", " ").strip()
+        
+        # 兜底背景描述
+        if not background_desc:
+            background_desc = "natural outdoor scenery, grass, sky, realistic background"
+    
+    # 生成正面提示词（补全背景）
+    positive_prompt = f"{background_desc}, seamless background, realistic details, high resolution, no {target_object}"
+    
+    # 生成负面提示词（禁止出现目标）
+    negative_prompt = f"{target_object}, animal, person, object, blurry, low quality, artifacts, text, watermark"
+    
+    return positive_prompt, negative_prompt

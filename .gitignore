@@ -37,6 +37,8 @@ var/
 wheels/
 pip-wheel-metadata/
 share/python-wheels/
+sdxl-inpaint-model/
+models/
 *.egg-info/
 .installed.cfg
 *.egg

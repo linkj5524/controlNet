@@ -127,6 +127,79 @@ class DDIMSampler(object):
                                                     ucg_schedule=ucg_schedule
                                                     )
         return samples, intermediates
+
+
+
+    def sample_without_grad(self,
+               S,
+               batch_size,
+               shape,
+               conditioning=None,
+               callback=None,
+               normals_sequence=None,
+               img_callback=None,
+               quantize_x0=False,
+               eta=0.,
+               mask=None,
+               x0=None,
+               temperature=1.,
+               noise_dropout=0.,
+               score_corrector=None,
+               corrector_kwargs=None,
+               verbose=True,
+               x_T=None,
+               log_every_t=100,
+               unconditional_guidance_scale=1.,
+               unconditional_conditioning=None, # this has to come in the same format as the conditioning, # e.g. as encoded tokens, ...
+               dynamic_threshold=None,
+               ucg_schedule=None,
+               **kwargs
+               ):
+        if conditioning is not None:
+            #判断不同的condition batch维度是否一致
+            if isinstance(conditioning, dict):
+                ctmp = conditioning[list(conditioning.keys())[0]]
+                while isinstance(ctmp, list): ctmp = ctmp[0]
+                cbs = ctmp.shape[0]
+                if cbs != batch_size:
+                    print(f"Warning: Got {cbs} conditionings but batch-size is {batch_size}")
+
+            elif isinstance(conditioning, list):
+                for ctmp in conditioning:
+                    if ctmp.shape[0] != batch_size:
+                        print(f"Warning: Got {cbs} conditionings but batch-size is {batch_size}")
+
+            else:
+                if conditioning.shape[0] != batch_size:
+                    print(f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}")
+        #设置ddim等方法 采样所需要的参数，包含α，β，t，σ等
+        self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=verbose)
+        # sampling
+        C, H, W = shape
+        size = (batch_size, C, H, W)
+        print(f'Data shape for DDIM sampling is {size}, eta {eta}')
+        # conditioning ：包含 边缘图和 文本信息；
+        #score_corrector： 分数矫正器，此处默认未用到；本质就是修改预测噪声过程中的梯度添加某些项，引导下降过程
+        samples, intermediates = self.ddim_sampling(conditioning, size,
+                                                    callback=callback,
+                                                    img_callback=img_callback,
+                                                    quantize_denoised=quantize_x0,
+                                                    mask=mask, x0=x0,
+                                                    ddim_use_original_steps=False,
+                                                    noise_dropout=noise_dropout,
+                                                    temperature=temperature,
+                                                    score_corrector=score_corrector,
+                                                    corrector_kwargs=corrector_kwargs,
+                                                    x_T=x_T,
+                                                    log_every_t=log_every_t,
+                                                    unconditional_guidance_scale=unconditional_guidance_scale,
+                                                    unconditional_conditioning=unconditional_conditioning,
+                                                    dynamic_threshold=dynamic_threshold,
+                                                    ucg_schedule=ucg_schedule
+                                                    )
+        return samples, intermediates
+    
+
     '''
     采样过程的核心过程，根据步长等信息，实现采样
     

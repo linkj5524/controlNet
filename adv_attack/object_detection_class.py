@@ -105,6 +105,8 @@ class ObjectDetection:
 
 
                     results = self._decode_yolo_output(out)
+                    class_id = results['labels'][0][0].detach().cpu().numpy()
+                    class_name = self.names[int(class_id)]
                     
             else:
                 #抛出异常
@@ -125,7 +127,7 @@ class ObjectDetection:
                 print("No detections found.")
                 return None
         
-        return results
+        return results,class_name
     
     def detect_return_dict(self, img,file_path=None,grad_status=False):
         # 输入的图像默认是RGB
@@ -163,6 +165,7 @@ class ObjectDetection:
 
 
                     results = self._decode_yolo_output(out)
+
             else:
                 #抛出异常
                 raise ValueError("Unsupported model type for postprocess")
@@ -173,6 +176,7 @@ class ObjectDetection:
         else:
             raise ValueError("Unsupported model type")
         
+
         # 保存结果
         if file_path is not None:
             
