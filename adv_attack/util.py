@@ -187,7 +187,9 @@ class YOLOv11DetectionLoss(nn.Module):
             self.penalty_giou =1
             
         if not hasattr(self, 'penalty_class'):  # 判断是否存在属性
-            self.penalty_class = 1
+            # 交叉熵损失的最大值，与类别有关
+            
+            self.penalty_class = 13.82
         if not hasattr(self, 'image_resolution'):  # 判断是否存在属性
             self.image_resolution = 512
 
@@ -423,8 +425,10 @@ class YOLOv11DetectionLoss(nn.Module):
             pred_boxes = pred_result['boxes'][b].to(device)  # [M_b, 4]
             pred_scores = pred_result['scores'][b].to(device)  # [M_b]
             pred_labels = pred_result['labels'][b].to(device)  # [M_b]
+            pred_scores_vector=pred_result['scores_vector'][b].to(device)
             gt_boxes = gt_result['boxes'][b].to(device)  # [K_b, 4]
             gt_labels = gt_result['labels'][b].to(device)  # [K_b]
+            gt_scores_vector=gt_result['scores_vector'][b].to(device)
             K_b = gt_boxes.shape[0]  # 该样本的真实框数量
             if K_b == 0:
                 continue  # 无真实框则跳过
@@ -435,6 +439,7 @@ class YOLOv11DetectionLoss(nn.Module):
             pred_boxes = pred_boxes[pred_mask]
             pred_scores = pred_scores[pred_mask]
             pred_labels = pred_labels[pred_mask]
+            pred_scores_vector=pred_scores_vector[pred_mask]
             M_b = pred_boxes.shape[0]  # 过滤后的预测框数量
 
             # 遍历该样本的每个真实框（核心修改：循环所有gt）
@@ -442,7 +447,7 @@ class YOLOv11DetectionLoss(nn.Module):
                 # 提取当前真实框（单独处理）
                 current_gt_box = gt_boxes[gt_idx:gt_idx+1]  # [1, 4]（保持维度）
                 current_gt_label = gt_labels[gt_idx:gt_idx+1]  # [1]
-
+                current_gt_scores_vector=gt_scores_vector[gt_idx:gt_idx+1]
                 if M_b == 0:
                     # 无预测框：对当前gt施加惩罚损失
                     total_class_loss += torch.tensor(self.penalty_class, device=device)
@@ -476,12 +481,16 @@ class YOLOv11DetectionLoss(nn.Module):
                 matched_pred_box = pred_boxes[best_pred_idx:best_pred_idx+1]  # [1, 4]
                 matched_pred_score = pred_scores[best_pred_idx:best_pred_idx+1]  # [1]
                 matched_pred_label = pred_labels[best_pred_idx:best_pred_idx+1]  # [1]
-
+                matched_pred_scores_vector=pred_scores_vector[best_pred_idx:best_pred_idx+1]
+                
                 # 6. 计算分类损失（当前gt的分类损失）
-                pred_log_prob = torch.log(matched_pred_score.clamp(min=1e-6, max=1.0))  # [1]
-                class_log_probs = torch.full((1, self.num_classes), -float('inf'), device=device)
-                class_log_probs[0, matched_pred_label] = pred_log_prob
-                class_loss = self.class_criterion(class_log_probs, current_gt_label).sum()
+                # pred_log_prob = torch.log(matched_pred_score.clamp(min=1e-6, max=1.0))  # [1]
+                # class_log_probs = torch.full((1, self.num_classes),  -1e6, device=device)
+                # class_log_probs[0, matched_pred_label] = pred_log_prob
+                # class_loss = self.class_criterion(class_log_probs, current_gt_label).sum()
+                # log计算
+                matched_pred_scores_vector_log=torch.log(matched_pred_scores_vector.clamp(min=1e-6, max=1.0))
+                class_loss = self.class_criterion(matched_pred_scores_vector_log, current_gt_label).sum()
                 total_class_loss += class_loss
 
                 # 7. 计算边界框L1损失

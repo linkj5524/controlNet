@@ -289,6 +289,7 @@ class ObjectDetection:
             'boxes': [B, M, 4] xyxy
             'scores': [B, M]
             'labels': [B, M]
+            'scores_raw': 
         """
         batch_size = raw_outs[0].shape[0] if isinstance(raw_outs, (list, tuple)) else raw_outs.shape[0]
 
@@ -301,25 +302,26 @@ class ObjectDetection:
         boxes_all = []
         scores_all = []
         labels_all = []
-
+        scores_vector_all=[]
         boxes = preds[..., :4]      # [B, N, 4]
         cls_conf = preds[..., 4:]   # [B, N, num_classes]
 
         for b in range(batch_size):
             # 每类最大置信度
             scores, labels = cls_conf[b].max(dim=1)  # [N], [N]
-
+            scores_vector=cls_conf[b]
             # 过滤低置信度
             mask = scores > self.conf_threshold
             valid_boxes = boxes[b][mask]
             valid_scores = scores[mask]
             valid_labels = labels[mask]
-
+            valid_scores_vector=scores_vector[mask]
             if valid_boxes.numel() == 0:
                 # 如果没有有效框，用空 tensor 占位
                 boxes_all.append(torch.zeros((0, 4), device=preds.device, dtype=preds.dtype))
                 scores_all.append(torch.zeros((0,), device=preds.device, dtype=preds.dtype))
                 labels_all.append(torch.zeros((0,), device=preds.device, dtype=torch.long))
+                scores_vector_all.append(torch.zeros((0,self.nc), device=preds.device, dtype=preds.dtype))
                 continue
 
             # 直接计算 xyxy
@@ -335,12 +337,14 @@ class ObjectDetection:
             boxes_all.append(boxes_xyxy[keep])
             scores_all.append(valid_scores[keep])
             labels_all.append(valid_labels[keep])
+            scores_vector_all.append(valid_scores_vector[keep])
 
         # 拼接 batch
         results = {
             'boxes': boxes_all,    # list of tensor per batch
             'scores': scores_all,
-            'labels': labels_all
+            'labels': labels_all,
+            'scores_vector': scores_vector_all
         }
 
         return results

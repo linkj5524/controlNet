@@ -2,7 +2,7 @@ import torch
 import torchvision
 import numpy as np
 import cv2
-
+import os
 # ------------------------------
 # 1. 适配 ObjectDetection 类的 IG/IDG 核心函数
 # ------------------------------
@@ -278,7 +278,7 @@ def getAlphaParameters(slopes, steps, step_size):
 # ------------------------------
 # 3. 可视化工具函数（将归因结果转为热力图）
 # ------------------------------
-def visualize_attribution(input_img, attributions, save_path="attribution_result.png"):
+def visualize_attribution(input_img, attributions, save_path="attribution_result",file_name_pre='attribution1'):
     """
     可视化归因结果：原始图像 + 归因热力图 + 叠加图
     :param input_img: 输入图像张量 (1, 3, H, W)（归一化到0-1）
@@ -305,7 +305,10 @@ def visualize_attribution(input_img, attributions, save_path="attribution_result
     overlay = cv2.addWeighted(input_img, 0.6, heatmap, 0.4, 0)
 
     # 保存结果
-    cv2.imwrite(save_path, np.hstack([input_img, heatmap, overlay]))
+    attribution_path = os.path.join(save_path, file_name_pre+'_attribution.jpg')
+    attribution_path_cmp = os.path.join(save_path, file_name_pre+'_attribution_cmp.jpg')
+    cv2.imwrite(attribution_path,heatmap )
+    cv2.imwrite(attribution_path_cmp, np.hstack([input_img, heatmap, overlay]))
     print(f"Attribution visualization saved to {save_path}")
 
 

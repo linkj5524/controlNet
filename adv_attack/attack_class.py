@@ -21,9 +21,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from annotator.util import resize_image, HWC3
 from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
-from object_detection_class import *
-from util import *
+# from util import *
+
+# 
 from adv_attack.util import *
+
+##
+sys.path.append(os.path.dirname(__file__))
+from object_detection_class import *
 from sam import *
 from captioner_blip_model import *
 from sd_inpaint import *
@@ -76,6 +81,8 @@ class ADV_ATTACK:
             "latent_fit_optim_epochs":10,
             "conf_threshold":0.25,
             "iou_threshold":0.1,
+            "attribution_loss_weight" :100,
+            "TV_loss_weight":10,
         }
             # scale  encode 8,优化为2，目前测试效果比较好
             # 后续改成一样，效果需要试验
@@ -427,7 +434,7 @@ class ADV_ATTACK:
 
     #     mask=self.generate_mask(background_imag)
 
-    def generate_adversarial_main(self,background_imag=None, params=None):
+    def generate_adversarial_main(self,background_imag=None, exp_path=r'./exp',params=None):
         """
         生成对抗样本
         
@@ -470,7 +477,8 @@ class ADV_ATTACK:
             background_imag_temp=background_imag.unsqueeze(0)
         else:
             background_imag_temp=background_imag
-        result_gt,object_class =self.object_detection.detect(background_imag_temp,file_path='background_detect.jpg',grad_status=True)
+        ref_detect_path=os.path.join(exp_path, 'background_detect.jpg')
+        result_gt,object_class =self.object_detection.detect(background_imag_temp,file_path=ref_detect_path,grad_status=True)
         
 
 
@@ -482,7 +490,7 @@ class ADV_ATTACK:
 
         input_point_list=self.yolo_boxes_to_corners(result_gt['boxes'])
         input_point=[input_point_list[0]]
-       # 基于输入的background_imag，利用sam，得到mask，返回mask。
+        # 基于输入的background_imag，利用sam，得到mask，返回mask。
         # 模型初始化
         sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
         # 处理,注意mask——logic 的维度，是否是多个通道
@@ -509,12 +517,14 @@ class ADV_ATTACK:
             print(f"index:{index},score:{scores[index]}")
             masks_logic=masks_logic_mutil[index]
             masks_tensor=masks_tensor_all[index]
-            tensor2picture(masks_tensor,"masks_tensor.png")
+            mask_path=os.path.join(exp_path, 'mask.jpg')
+            tensor2picture(masks_tensor,mask_path)
 
 
             
         control_image=self.canny_with_mask_invert(background_imag,masks_logic)
-        tensor2picture(control_image,"control_image.png") 
+        control_path=os.path.join(exp_path, 'control.jpg')
+        tensor2picture(control_image,control_path) 
        
 
 
@@ -617,7 +627,8 @@ class ADV_ATTACK:
         )  # Magic number. IDK why
         
         object_image=self.extract_mask_content(background_imag,masks_logic)
-        tensor2picture(object_image,"object_image.png") 
+
+        # tensor2picture(object_image,"object_image.png") 
         # 输入是-1~1
         # 将0,1 转换成-1,1
         object_image_n1_1=object_image*2-1
@@ -636,7 +647,8 @@ class ADV_ATTACK:
 
         # 4. 可视化结果
         if attributions_ref is not None:
-            visualize_attribution(object_image, attributions_ref, save_path="ig_detection_result_ref.png")
+            # attribution_ref_path=os.path.join(exp_path, 'attribution_ref.png')
+            visualize_attribution(object_image, attributions_ref, save_path=exp_path,file_name_pre='attribution_ref')
         else:
             print("Attribution failed!")
 
@@ -683,7 +695,8 @@ class ADV_ATTACK:
             unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
 
         # 获取目标检测模型的输出，也可以直接传入这些已知的信息,用于后续计算，确保只用某个目标
-        result_gt,class_name =self.object_detection.detect(object_image,file_path='result1.jpg',grad_status=True)
+        object_path = os.path.join(exp_path, 'object_detext.jpg')
+        result_gt_temp,class_name =self.object_detection.detect(object_image,file_path=object_path,grad_status=True)
         
 
 
@@ -721,7 +734,7 @@ class ADV_ATTACK:
         optimizer = torch.optim.Adam([latent_start], lr=5e-2)
         cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
         attr_loss_l2 = nn.MSELoss()
-
+        TV_Loss=TVLoss()
         #开始步骤
         t_start=self.ddim_sampler.ddim_timesteps[-1]
         for epoch in range(params["optim_epochs"]):
@@ -734,11 +747,14 @@ class ADV_ATTACK:
             # 转换成图片
             image=self.latent_to_imgTensor01(end_latent)
             image_object_on_background=self.batched_tensor_mask_overlay(background_imag,image,masks_logic)
-            result_temp,_=self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
+            # result_temp,_=self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
             # 目标检测模型的输出
-            result,_  =self.object_detection.detect(image_object_on_background,file_path='restore.jpg',grad_status=True)
+            temp_path=os.path.join(exp_path, 'result_temp.jpg')
+            result,_  =self.object_detection.detect(image_object_on_background,file_path=temp_path,grad_status=True)
 
-
+            if image is None:
+                print("对抗样本为空")
+                continue
             attributions = IG_Detection(
                 input_img=image,
                 det_model=self.object_detection, 
@@ -749,29 +765,28 @@ class ADV_ATTACK:
                 target_obj_idx=0
             )
 
-            # 4. 可视化结果
-            if attributions is not None:
-                visualize_attribution(background_imag, attributions, save_path="ig_detection_result.png")
-            else:
-                print("Attribution failed!")
+            # # 4. 可视化结果
+            # if attributions is not None:
+            #     visualize_attribution(background_imag, attributions, save_path=r"exp\attribution")
+            # else:
+            #     print("Attribution failed!")
 
             attr_loss=attr_loss_l2(attributions,attributions_ref)
-            print(f"result:{result}")
+            print(f"attr_loss:{attr_loss}")
             loss ,loss_dict= cross_entro_loss(result, result_gt)
             print(f"total_loss:{loss}")
+            print(f"class_loss:{loss_dict['class_loss']}")
+            tv_loss=TV_Loss(image)
+            print(f"tv_loss:{tv_loss}")
             optimizer.zero_grad()
             
-            loss_dict['giou_loss']
-            attr_loss.backward()
-            # (-loss_dict['class_loss']).backward()
-            # try:
-            #     # loss_dict['bbox_l1_loss'].backward()
-            #     # loss_dict['giou_loss']
-            #     (-loss_dict['class_loss']).backward()
-            #     # (-loss).backward()
-            # except:
-            #     print("loss_dict['class_loss'] is None")
-            #     break          
+
+            try:
+
+                ( params['TV_loss_weight'] *tv_loss+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
+            except:
+                print("loss_dict['class_loss'] is None")
+                          
 
             optimizer.step()
             # 手动清理变量，帮助回收内存
@@ -786,7 +801,8 @@ class ADV_ATTACK:
 
         image1=self.tensor_01_to_numpy_255(image_tensor)
         # 保存对抗样本
-        cv2.imwrite('result_adv_attack.png',image1)
+        adv_path=os.path.join(exp_path, 'adv_path.jpg')
+        cv2.imwrite(adv_path,image1)
 
 
 
@@ -2081,7 +2097,7 @@ if __name__=='__main__':
     attack = ADV_ATTACK(device=torch.device("cuda"),model_path=controlNet_model_path,model_path_object_detection=model_path,sam_model_type='vit_h',sam_checkpoint_path=sam_path)
     img=cv2_to_tensor(img,normalize=True)
     
-    attack.generate_adversarial_main(img)
+    attack.generate_adversarial_main(img,exp_path=r"./exp/test")
     # attack.generate_adversarial_example_optim_control_v2(img)
     # attack.generate_adversarial_example(img,control_img)
     # attack.generate_adversarial_example_optim_control_v2(img,control_img)
