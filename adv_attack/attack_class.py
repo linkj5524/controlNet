@@ -776,32 +776,30 @@ class ADV_ATTACK:
             loss ,loss_dict= cross_entro_loss(result, result_gt)
             print(f"total_loss:{loss}")
             print(f"class_loss:{loss_dict['class_loss']}")
+            print(f"label_gt:{result_gt['labels']},label_pred:{result['labels']}")
+            print(f"score_gt:{result_gt['scores']},score_pred:{result['scores']}")
             tv_loss=TV_Loss(image)
             print(f"tv_loss:{tv_loss}")
             optimizer.zero_grad()
             
 
-            try:
+            
 
-                ( params['TV_loss_weight'] *tv_loss+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
-            except:
-                print("loss_dict['class_loss'] is None")
+            ( params['TV_loss_weight'] *tv_loss+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
+
                           
 
             optimizer.step()
             # 手动清理变量，帮助回收内存
-            del loss,loss_dict
+            del loss,loss_dict,tv_loss,attr_loss
             torch.cuda.empty_cache()
 
 
-        # 得到最终的对抗样本    
-        # end_latent=self.ddim_sampler.decode(  latent_start, cond_ref, t_start, unconditional_guidance_scale=20.0, unconditional_conditioning=un_cond,
-        #         use_original_steps=False, callback=None)
         image_tensor=self.latent_to_imgTensor01(end_latent)
 
         image1=self.tensor_01_to_numpy_255(image_tensor)
         # 保存对抗样本
-        adv_path=os.path.join(exp_path, 'adv_path.jpg')
+        adv_path=os.path.join(exp_path, 'adv_example.jpg')
         cv2.imwrite(adv_path,image1)
 
 

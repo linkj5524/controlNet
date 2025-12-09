@@ -178,6 +178,9 @@ def getGradientsDetection(interp_imgs, det_model, target_obj_idx):
         # 提取特定目标的类别置信度（若检测不到目标，置信度设为0）
         if len(results['scores'][0]) <= target_obj_idx:
             score = torch.tensor(0.0, device=img.device, requires_grad=True)
+            target_scores.append(score)
+            continue
+            # score = torch.tensor(0.0, device=img.device, requires_grad=True)
         else:
             score = results['scores'][0][target_obj_idx]  # (1,) 张量
 
@@ -187,13 +190,109 @@ def getGradientsDetection(interp_imgs, det_model, target_obj_idx):
     # 批量反向传播：计算所有图像的梯度（求和后反向传播，等价于逐个传播）
     total_score = torch.stack(target_scores).sum()  # 批量置信度求和
     total_score.backward()  # 反向传播计算梯度
-
     # 提取每个图像的梯度
+    ## 判断是否存在grad，不存在，则创建一个全0张量
+    if interp_imgs.grad is None:
+        interp_imgs.grad = torch.zeros_like(interp_imgs)
+    
+    
     for i in range(batch_size):
+        
         grad = interp_imgs.grad[i:i+1].detach().squeeze()  # (3, H, W)
         gradients.append(grad)
 
     return torch.stack(gradients), torch.stack(target_scores)
+
+
+# def getGradientsDetection(interp_imgs, det_model, target_obj_idx):
+#     """
+#     稳定版：计算插值图像对特定目标置信度的梯度（兼容检测不到目标的情况）
+#     :param interp_imgs: 插值图像批次 (batch_size, 3, H, W)
+#     :param det_model: ObjectDetection 实例（YOLO类）
+#     :param target_obj_idx: 目标索引（检测结果中第几个目标）
+#     :return: 
+#         gradients: 梯度张量 (batch_size, 3, H, W)
+#         target_scores: 目标置信度 (batch_size,)
+#     """
+#     # --------------------------
+#     # 1. 核心准备：确保输入张量是叶子张量且开启梯度
+#     # --------------------------
+#     batch_size = interp_imgs.shape[0]
+#     device = det_model.device
+    
+#     # 重新创建叶子张量（避免原张量是非叶子/梯度被冻结）
+#     interp_imgs = interp_imgs.to(device, non_blocking=True)
+#     interp_imgs.requires_grad_(True)  # 等价于 requires_grad = True（更安全）
+#     interp_imgs.retain_grad()  # 强制保留叶子张量的梯度（关键！）
+    
+#     # 清空模型和张量的旧梯度（避免累积）
+#     det_model.model.zero_grad(set_to_none=True)  # 比zero_()更高效
+#     if interp_imgs.grad is not None:
+#         interp_imgs.grad.zero_()
+
+#     # --------------------------
+#     # 2. 批量推理：禁用no_grad，确保梯度链路完整
+#     # --------------------------
+#     target_scores = []
+#     det_model.model.train()  # 模型切到训练模式（启用梯度）
+    
+#     for i in range(batch_size):
+#         # 避免切片：直接用索引访问（减少非叶子张量）
+#         img = interp_imgs[i:i+1].contiguous()  # 保持维度 (1, 3, H, W)
+        
+#         # 关键：强制禁用no_grad（覆盖detect_return_dict内部的no_grad）
+#         with torch.enable_grad():
+#             results = det_model.detect_return_dict(img, grad_status=True)
+        
+#         # --------------------------
+#         # 3. 安全提取目标得分（保证梯度链路不中断）
+#         # --------------------------
+#         if len(results['scores'][0]) <= target_obj_idx:
+#             # 隐患修复：用与输入关联的0值张量（而非全新张量）
+#             score = torch.zeros(1, device=device, requires_grad=True)
+#             # 强制建立梯度关联（即使得分是0，也能回传梯度）
+#             score = score + interp_imgs[i:i+1].sum() * 1e-10  # 极小值不影响结果，但保留链路
+#         else:
+#             # 提取得分并确保是标量（避免维度问题）
+#             score = results['scores'][0][target_obj_idx].squeeze()  # 标量张量
+        
+#         target_scores.append(score)
+
+#     # --------------------------
+#     # 4. 批量反向传播 + 梯度校验
+#     # --------------------------
+#     # 求和后反向传播（等价于逐个传播，效率更高）
+#     total_score = torch.stack(target_scores).sum()
+    
+#     # 反向传播（保留计算图，方便调试）
+#     total_score.backward(retain_graph=True)
+    
+#     # 梯度非空校验（核心：避免TypeError）
+#     if interp_imgs.grad is None:
+#         raise RuntimeError(
+#             f"梯度计算失败！原因：\n"
+#             f"1. interp_imgs.requires_grad = {interp_imgs.requires_grad}\n"
+#             f"2. total_score = {total_score.item()}\n"
+#             f"3. 模型是否在train模式：{det_model.model.training}"
+#         )
+
+#     # --------------------------
+#     # 5. 提取梯度（安全切片）
+#     # --------------------------
+#     gradients = []
+#     for i in range(batch_size):
+#         # 安全提取：先判断梯度是否存在，再切片
+#         grad = interp_imgs.grad[i].detach().contiguous()  # (3, H, W)
+#         gradients.append(grad)
+
+#     # --------------------------
+#     # 6. 结果整理
+#     # --------------------------
+#     gradients = torch.stack(gradients)  # (batch_size, 3, H, W)
+#     target_scores = torch.stack(target_scores)  # (batch_size,)
+
+#     return gradients, target_scores
+
 
 
 def getSlopesDetection(baseline, baseline_diff, det_model, steps, batch_size, target_obj_idx):

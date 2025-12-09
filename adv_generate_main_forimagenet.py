@@ -54,7 +54,7 @@ if __name__ == '__main__':
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = 1 
     IMG_SIZE = 256  
-    IMG_ROOT = r"D:\FILELin\postgraduate\little_paper\imagenet2012\imagenet"  # 整理后的验证集根目录
+    VAL_ROOT = r"D:\FILELin\postgraduate\little_paper\imagenet2012\imagenet"  # 整理后的验证集根目录
 
     # --------------------------
     # 2. 验证集预处理（无数据增强！）
@@ -72,36 +72,34 @@ if __name__ == '__main__':
     # 3. 加载验证集
     # --------------------------
     # ImageFolder自动按文件夹名称分配类别标签（0-999）
-    img_dataset = CustomImageDataset(
-        root_dir=IMG_ROOT,
+    val_dataset = torchvision.datasets.ImageFolder(
+        root=VAL_ROOT,
         transform=val_transform
     )
 
     # 构建数据加载器（验证集无需shuffle）
-    # 构建数据加载器（保留原有配置）
-    img_loader = DataLoader(
-        img_dataset,
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=False,  # 验证/生成对抗样本时禁止shuffle，保证顺序
-        num_workers=4,
-        pin_memory=True
+        shuffle=False,  # 关键：验证集shuffle=False，保证评估结果可复现
+        num_workers=4,  # 线程数=CPU核心数/2（如8核CPU设4）
+        pin_memory=True  # 加速GPU数据传输（减少卡顿）
     )
 
-
+    # 查看验证集基本信息
+    print(f"验证集样本总数：{len(val_dataset)}")  # 输出50000
+    print(f"类别数：{len(val_dataset.classes)}")  # 输出1000
+    print(f"前5个类别名称：{val_dataset.classes[:5]}")  # 输出类别WNID对应的名称
 
     # --------------------------
-    # 4. 迭代（对抗样本生成）
+    # 4. 迭代验证集（对抗样本生成）
     # --------------------------
 
 
 
 
-    for batch_idx, (images, images_path) in enumerate(img_loader):
+    for batch_idx, (images, labels) in enumerate(val_loader):
         exp_root=os.path.join(root_path,'exp/test')
-        # 获取图片文件名,去除后缀
-        image_name = os.path.splitext(os.path.basename(images_path[0]))[0]
-        # image_name = os.path.basename(images_path[0])
-        exp_path=os.path.join(exp_root,f"{image_name}")
+        exp_path=os.path.join(exp_root,f"{batch_idx}")
         os.makedirs(exp_path,exist_ok=True)
         attack.generate_adversarial_main(images,exp_path=exp_path)
-        attack.destroy_controlnet()

@@ -8,6 +8,7 @@ from torchvision.ops import generalized_box_iou  # GIoU计算工具
 import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
+from torch.utils.data import Dataset, DataLoader
 # 纯PyTorch实现的匈牙利算法（无改动，确保不依赖外部库）
 # def hungarian_matching(cost_matrix):
 #     """
@@ -829,3 +830,53 @@ def generate_inpaint_prompt(original_caption, target_object="dog", background_de
     negative_prompt = f"{target_object}, animal, person, object, blurry, low quality, artifacts, text, watermark"
     
     return positive_prompt, negative_prompt
+
+
+
+class CustomImageDataset(Dataset):
+    def __init__(self, root_dir, transform=None, img_extensions=['.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.PNG','JPEG']):
+        """
+        自定义数据集：遍历指定目录下所有图片（递归查找）
+        :param root_dir: 图片根目录
+        :param transform: 预处理变换
+        :param img_extensions: 支持的图片格式
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.img_extensions = img_extensions
+        # 递归获取所有图片路径
+        self.img_paths = self._get_all_img_paths()
+
+    def _get_all_img_paths(self):
+        """递归遍历目录，获取所有图片路径"""
+        img_paths = []
+        # 递归遍历所有子目录
+        for root, dirs, files in os.walk(self.root_dir):
+            for file in files:
+                # 过滤图片格式
+                if any(file.endswith(ext) for ext in self.img_extensions):
+                    img_path = os.path.join(root, file)
+                    img_paths.append(img_path)
+        if not img_paths:
+            raise ValueError(f"目录 {self.root_dir} 下未找到任何图片！")
+        return img_paths
+
+    def __len__(self):
+        """返回图片总数"""
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        """加载单张图片（返回：预处理后的张量 + 图片路径）"""
+        img_path = self.img_paths[idx]
+        try:
+            # 读取图片并转为RGB（避免灰度图）
+            img = Image.open(img_path).convert('RGB')
+        except Exception as e:
+            raise RuntimeError(f"加载图片失败 {img_path}：{e}")
+        
+        # 应用预处理
+        if self.transform:
+            img = self.transform(img)
+        
+        # 返回：图片张量 + 图片路径（用于后续记录）
+        return img, img_path
