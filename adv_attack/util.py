@@ -469,14 +469,14 @@ class YOLOv11DetectionLoss(nn.Module):
                 min_cost, best_pred_idx = torch.min(cost_matrix, dim=0)  # 找到最优预测框索引
                 best_pred_idx = best_pred_idx.item()  # 转为标量索引
 
-                # # 4. 检查匹配有效性（IoU达标+类别匹配）
-                # valid = (iou_matrix[best_pred_idx] >= self.iou_thres) and (class_match[best_pred_idx] == 1.0)
-                # if not valid:
-                #     # 无效匹配：施加惩罚
-                #     total_class_loss += torch.tensor(self.penalty_class, device=device)
-                #     total_bbox_l1_loss += torch.tensor(self.penalty_bbox, device=device)
-                #     total_giou_loss += torch.tensor(self.penalty_giou, device=device)
-                #     continue
+                # 4. 检查匹配有效性（IoU达标+类别匹配）
+                valid = (iou_matrix[best_pred_idx] >= self.iou_thres) 
+                if not valid:
+                    # 无效匹配：施加惩罚
+                    total_class_loss += torch.tensor(self.penalty_class, device=device)
+                    total_bbox_l1_loss += torch.tensor(self.penalty_bbox, device=device)
+                    total_giou_loss += torch.tensor(self.penalty_giou, device=device)
+                    continue
 
                 # 5. 提取匹配的预测框
                 matched_pred_box = pred_boxes[best_pred_idx:best_pred_idx+1]  # [1, 4]

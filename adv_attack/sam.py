@@ -52,6 +52,12 @@ def segment_tensor(predictor, tensor_img, input_point=None, input_label=None,mut
     tensor_img: 输入图像，格式为 BCHW（batch=1, channel=3, height, width），值范围 0-1
     input_point: 引导点坐标 (x, y)，格式为 [[x1, y1], [x2, y2]]
     input_label: 点标签（1=前景，0=背景）
+    mutil_mask: 是否返回多个掩码
+    返回：
+    - img_np: 输入图像，格式为 numpy 数组，值范围 0-255
+    - masks: SAM 输出的分割掩码，格式为 numpy 数组，形状为 (num_masks, H, W)
+    - masks_tensor: 转换为 tensor 的分割掩码，格式为 tensor，形状为 (num_masks, H, W)
+    - scores: 掩码置信度分数，格式为 numpy 数组，形状为 (num_masks,)
     """
 
     

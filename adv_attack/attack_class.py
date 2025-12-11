@@ -695,7 +695,7 @@ class ADV_ATTACK:
             unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
 
         # 获取目标检测模型的输出，也可以直接传入这些已知的信息,用于后续计算，确保只用某个目标
-        object_path = os.path.join(exp_path, 'object_detext.jpg')
+        object_path = os.path.join(exp_path, 'object_detect.jpg')
         result_gt_temp,class_name =self.object_detection.detect(object_image,file_path=object_path,grad_status=True)
         
 
@@ -795,12 +795,12 @@ class ADV_ATTACK:
             torch.cuda.empty_cache()
 
 
-        image_tensor=self.latent_to_imgTensor01(end_latent)
+        # image_tensor=self.latent_to_imgTensor01(end_latent)
 
-        image1=self.tensor_01_to_numpy_255(image_tensor)
+        # image1=self.tensor_01_to_numpy_255(image_tensor)
         # 保存对抗样本
         adv_path=os.path.join(exp_path, 'adv_example.jpg')
-        cv2.imwrite(adv_path,image1)
+        cv2.imwrite(adv_path,image_object_on_background)
 
 
 
@@ -809,6 +809,326 @@ class ADV_ATTACK:
         
         return 
 
+    def generate_adversarial_main_all_mask(self,background_imag=None, exp_path=r'./exp',params=None):
+        """
+        生成对抗样本
+        
+        参数:
+            control_image: 控制图像 (用于ControlNet)
+            params: 覆盖默认参数的字典
+            
+        返回:
+            生成的对抗图像列表
+        """
+        # 图像预处理，
+        background_imag=self.pad_to_square(background_imag)
+        # 使用默认参数或用户指定参数
+        if params is None:
+            params = self.default_params
+        else:
+            params = {**self.default_params, **params}
+        self.default_params = params
+        # 设置随机种子以确保结果可复现
+        torch.manual_seed(params["seed"])
+        np.random.seed(params["seed"])
+        self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+
+
+        # background——image 的文本描述提取
+        blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
+        background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
+        print(f"\n背景图像描述: {background_imag_caption}")
+        destroy_image_captioner(blip_model)
+
+
+
+
+
+
+       # detect model 初始化
+        self.init_object_detection()
+        if background_imag.ndim == 3:
+            background_imag_temp=background_imag.unsqueeze(0)
+        else:
+            background_imag_temp=background_imag
+        ref_detect_path=os.path.join(exp_path, 'background_detect.jpg')
+        result_gt,object_class =self.object_detection.detect(background_imag_temp,file_path=ref_detect_path,grad_status=True)
+        
+
+
+
+
+
+
+
+
+        input_point_list=self.yolo_boxes_to_corners(result_gt['boxes'])
+        input_point=[input_point_list[0]]
+        # 基于输入的background_imag，利用sam，得到mask，返回mask。
+        # 模型初始化
+        sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
+        # 处理,注意mask——logic 的维度，是否是多个通道
+        img_np, masks_logic_mutil, masks_tensor_all, scores=segment_tensor(sam_predicter, background_imag, input_point=input_point, input_label=[1],mutil_mask=True)
+        # detach
+        masks_tensor_all=masks_tensor_all.detach()
+        
+        
+
+        # visualize_sam(background_imag, masks_logic_mutil, scores)
+        destroy_sam(sam_predicter)
+
+
+
+        # control 处理
+
+        # 填充，计算canny，返回tensor
+        if masks_logic_mutil.shape[0]>1:
+            # 计算掩码区域最大的索引
+            mask_areas = masks_logic_mutil.sum(axis=(1, 2))  # 对 H 和 W 维度求和，得到每个通道的面积
+
+            # 找到面积最大的通道索引
+            index = np.argmax(mask_areas)
+            print(f"index:{index},score:{scores[index]}")
+            masks_logic=masks_logic_mutil[index]
+            masks_tensor=masks_tensor_all[index]
+            mask_path=os.path.join(exp_path, 'mask.jpg')
+            tensor2picture(masks_tensor,mask_path)
+
+
+        # 创建mask_logic_temp,里面全是True,numpy
+        mask_logic_temp = np.ones_like(masks_logic, dtype=bool)
+           
+        control_image=self.canny_with_mask_invert(background_imag,mask_logic_temp)
+        control_path=os.path.join(exp_path, 'control.jpg')
+        tensor2picture(control_image,control_path) 
+       
+
+
+
+        # 初始化模型
+        self.init_controlnet()
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=False)
+
+
+
+
+        # # 预处理图像
+        # ## 确保图像通道正常,对图像的size有要求，不能随便的大小
+         
+        # input_image=scale_tensor_to_resolution(input_image,self.default_params["image_resolution"],self.default_params["image_resolution"])
+        
+        # # control_image 处理，背景图像，mask，得到control，计算canny边缘。
+        
+        # control_image=scale_tensor_to_resolution(control_image,self.default_params["image_resolution"],self.default_params["image_resolution"])
+        
+        # self.control=binarize_image_tensor(control_image)     
+        # 添加b
+        # 判断control 的维度
+        if control_image.dim()==3:
+            control_image=control_image.unsqueeze(0)
+
+        
+
+
+        
+
+        # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
+        cond = {
+            "c_concat": [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    [background_imag_caption + ', ' + params["a_prompt"]] * params["num_samples"]
+                )
+            ]
+        }
+        un_cond = {
+            "c_concat": None if params["guess_mode"] else [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    [params["n_prompt"]] * params["num_samples"]
+                )
+            ]
+        }
+ 
+        # 判断维度  
+        if background_imag.dim()==3:
+            background_imag=background_imag.unsqueeze(0)
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
+
+
+
+
+
+
+
+
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=True)
+
+
+        self.model.control_scales = (
+            [params["strength"] * (0.825 ** float(12 - i)) for i in range(13)]
+            if params["guess_mode"]
+            else [params["strength"]] * 13
+        )  # Magic number. IDK why
+        
+        object_image=self.extract_mask_content(background_imag,mask_logic_temp)
+
+        # tensor2picture(object_image,"object_image.png") 
+        # 输入是-1~1
+        # 将0,1 转换成-1,1
+        object_image_n1_1=object_image*2-1
+        latent_input = self.imgTensor_to_latent(object_image_n1_1)
+
+        # 参考归因
+        attributions_ref = IG_Detection(
+            input_img=object_image,
+            det_model=self.object_detection,
+            steps=50,
+            batch_size=10,
+            alpha_star=1.0,
+            baseline=0.0,
+            target_obj_idx=0
+        )
+
+        # 4. 可视化结果
+        if attributions_ref is not None:
+            # attribution_ref_path=os.path.join(exp_path, 'attribution_ref.png')
+            visualize_attribution(object_image, attributions_ref, save_path=exp_path,file_name_pre='attribution_ref')
+        else:
+            print("Attribution failed!")
+
+
+
+
+        # 设置采样参数
+        self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
+
+        
+
+        # 使用封装的ddim进行逆采样
+        ## latent_start 表示逆采样的结果（噪声最大的latent），out 表示所有的中间结果
+        with torch.no_grad():
+            latent_start,out=self.ddim_sampler.encode_return_all(x0=latent_input, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
+            unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
+
+        # 获取目标检测模型的输出，也可以直接传入这些已知的信息,用于后续计算，确保只用某个目标
+        object_path = os.path.join(exp_path, 'object_detect.jpg')
+        result_gt_temp,class_name =self.object_detection.detect(object_image,file_path=object_path,grad_status=True)
+        
+
+
+
+
+
+        cond_ref = {
+            "c_concat": [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    ["military camouflage pattern,army green and brown color sheme"] * params["num_samples"]
+                )
+            ]
+        }
+        # 保存中间结果
+        # 对初始latent进行优化
+        # 需要 1. 优化目标 2. 优化器 3. 优化参数 4. 后处理函数
+        # 优化目标：目标检测模型的输出与原始的检测框，类别等的差值
+        # 优化器：Adam
+        # 优化参数：latent
+        # 后处理函数，根据检测模型的输出，得到结果，并进行优化
+
+
+
+
+
+
+
+
+
+
+
+        latent_start=latent_start.detach().clone()
+        latent_start.requires_grad = True
+        optimizer = torch.optim.Adam([latent_start], lr=5e-2)
+        cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
+        attr_loss_l2 = nn.MSELoss()
+        TV_Loss=TVLoss()
+        #开始步骤
+        t_start=self.ddim_sampler.ddim_timesteps[-1]
+        for epoch in range(params["optim_epochs"]):
+            # 循环，优化
+            end_latent=self.ddim_sampler.decode(  latent_start, cond, t_start, unconditional_guidance_scale=params["scale_optim"], unconditional_conditioning=un_cond,
+                use_original_steps=False, callback=None)
+
+
+
+            # 转换成图片
+            image=self.latent_to_imgTensor01(end_latent)
+            image_object_on_background=self.batched_tensor_mask_overlay(background_imag,image,masks_logic)
+            # result_temp,_=self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
+            # 目标检测模型的输出
+            temp_path=os.path.join(exp_path, 'result_temp.jpg')
+            result,_  =self.object_detection.detect(image_object_on_background,file_path=temp_path,grad_status=True)
+
+            if image is None:
+                print("对抗样本为空")
+                continue
+            attributions = IG_Detection(
+                input_img=image,
+                det_model=self.object_detection, 
+                steps=50,
+                batch_size=10,
+                alpha_star=1.0,
+                baseline=0.0,
+                target_obj_idx=0
+            )
+
+            # # 4. 可视化结果
+            # if attributions is not None:
+            #     visualize_attribution(background_imag, attributions, save_path=r"exp\attribution")
+            # else:
+            #     print("Attribution failed!")
+
+            attr_loss=attr_loss_l2(attributions,attributions_ref)
+            print(f"attr_loss:{attr_loss}")
+            loss ,loss_dict= cross_entro_loss(result, result_gt)
+            print(f"total_loss:{loss}")
+            print(f"class_loss:{loss_dict['class_loss']}")
+            print(f"label_gt:{result_gt['labels']},label_pred:{result['labels']}")
+            print(f"score_gt:{result_gt['scores']},score_pred:{result['scores']}")
+            tv_loss=TV_Loss(image)
+            print(f"tv_loss:{tv_loss}")
+            optimizer.zero_grad()
+            
+
+            
+
+            ( params['TV_loss_weight'] *tv_loss+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
+
+                          
+
+            optimizer.step()
+            # 手动清理变量，帮助回收内存
+            del loss,loss_dict,tv_loss,attr_loss
+            torch.cuda.empty_cache()
+
+
+        # image_tensor=self.latent_to_imgTensor01(end_latent)
+
+        # image1=self.tensor_01_to_numpy_255(image_tensor)
+        # 保存对抗样本
+        adv_path=os.path.join(exp_path, 'adv_example.jpg')
+        cv2.imwrite(adv_path,image_object_on_background)
+
+
+
+
+        
+        
+        return 
 
 
     # 中间latent 结果，

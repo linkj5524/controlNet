@@ -94,7 +94,7 @@ if __name__ == '__main__':
     # --------------------------
 
 
-
+ 
 
     for batch_idx, (images, images_path) in enumerate(img_loader):
         exp_root=os.path.join(root_path,'exp/test')
@@ -103,5 +103,11 @@ if __name__ == '__main__':
         # image_name = os.path.basename(images_path[0])
         exp_path=os.path.join(exp_root,f"{image_name}")
         os.makedirs(exp_path,exist_ok=True)
-        attack.generate_adversarial_main(images,exp_path=exp_path)
+        # attack.generate_adversarial_main(images,exp_path=exp_path)
+        try:
+            # attack.generate_adversarial_main(images,exp_path=exp_path)
+            attack.generate_adversarial_main_all_mask(images,exp_path=exp_path)
+        except:
+            print(f"{image_name} error")
+        
         attack.destroy_controlnet()
