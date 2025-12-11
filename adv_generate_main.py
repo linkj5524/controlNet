@@ -61,8 +61,8 @@ if __name__ == '__main__':
     # --------------------------
     # 注意：验证集仅做resize、中心裁剪、归一化，禁止随机增强（保证评估公平）
     val_transform = transforms.Compose([
-        transforms.Resize(IMG_SIZE),  # 先resize到256×256（保留更多细节）
-        transforms.CenterCrop(IMG_SIZE),  # 中心裁剪到224×224（模型输入尺寸）
+        ResizeMaxEdge(max_edge_size=IMG_SIZE),  # 最大边缩放到256
+        PadToFixedSize(target_size=IMG_SIZE),  # 填充到256×256（中心对齐）
         transforms.ToTensor(),  # 转为张量（0-1）
     ])
 
@@ -77,12 +77,11 @@ if __name__ == '__main__':
         transform=val_transform
     )
 
-    # 构建数据加载器（验证集无需shuffle）
-    # 构建数据加载器（保留原有配置）
+
     img_loader = DataLoader(
         img_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=False,  # 验证/生成对抗样本时禁止shuffle，保证顺序
+        shuffle=False,  
         num_workers=4,
         pin_memory=True
     )

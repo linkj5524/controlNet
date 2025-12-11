@@ -1,9 +1,11 @@
+import math
 import os
 import re
 import cv2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
 from torchvision.ops import generalized_box_iou  # GIoU计算工具
 import torchvision.transforms as transforms
 import numpy as np
@@ -880,3 +882,77 @@ class CustomImageDataset(Dataset):
         
         # 返回：图片张量 + 图片路径（用于后续记录）
         return img, img_path
+    
+class ResizeMaxEdge:
+    def __init__(self, max_edge_size):
+        self.max_edge_size = max_edge_size
+
+    def __call__(self, img):
+        """
+        将图片最大边缩放到max_edge_size，短边按比例缩放（保持宽高比）
+        :param img: PIL Image对象
+        :return: 缩放后的PIL Image
+        """
+        # 获取原图尺寸
+        w, h = img.size
+        # 计算缩放比例（最大边=max_edge_size）
+        scale = self.max_edge_size / max(w, h)
+        # 计算新尺寸（四舍五入为整数）
+        new_w = int(math.ceil(w * scale))
+        new_h = int(math.ceil(h * scale))
+        # 缩放（保持宽高比）
+        img_resized = torchvision.transforms.functional.resize(img, (new_h, new_w), antialias=True)  # resize参数是(H, W)
+        return img_resized
+
+# # --------------------------
+# # 自定义变换：缩放后填充到固定尺寸（可选，替代中心裁剪）
+# # --------------------------
+# class PadToFixedSize:
+#     def __init__(self, target_size, fill=0):
+#         self.target_size = target_size  # (H, W)
+#         self.fill = fill  # 填充值（默认黑色）
+
+#     def __call__(self, img):
+#         """缩放后填充到固定尺寸，中心对齐"""
+#         w, h = img.size
+#         target_h, target_w = self.target_size
+#         # 计算填充量
+#         pad_left = (target_w - w) // 2
+#         pad_right = target_w - w - pad_left
+#         pad_top = (target_h - h) // 2
+#         pad_bottom = target_h - h - pad_top
+#         # 填充
+#         img_padded = torchvision.transforms.functional.pad(img, (pad_left, pad_top, pad_right, pad_bottom), fill=self.fill)
+#         return img_padded
+class PadToFixedSize:
+    def __init__(self, target_size, fill=0):
+        """
+        修复：自动兼容单个整数/元组输入，避免解包错误
+        :param target_size: 目标尺寸（int → (size, size)；tuple → (h, w)）
+        :param fill: 填充值（默认黑色）
+        """
+        # 核心修复：统一转为元组
+        if isinstance(target_size, int):
+            self.target_size = (target_size, target_size)  # 单个整数→正方形
+        elif isinstance(target_size, (tuple, list)) and len(target_size) == 2:
+            self.target_size = (int(target_size[0]), int(target_size[1]))  # 元组/列表→(h,w)
+        else:
+            raise ValueError(
+                f"target_size必须是整数或长度为2的元组/列表！当前输入：{target_size}"
+            )
+        self.fill = fill  # 填充值（默认黑色）
+
+    def __call__(self, img):
+        """缩放后填充到固定尺寸，中心对齐"""
+        w, h = img.size  # PIL Image的size是(w, h)
+        target_h, target_w = self.target_size  # 现在一定是元组，可安全解包
+        
+        # 计算填充量（保证中心对齐）
+        pad_left = (target_w - w) // 2
+        pad_right = target_w - w - pad_left
+        pad_top = (target_h - h) // 2
+        pad_bottom = target_h - h - pad_top
+        
+        # 填充（注意：pad的参数顺序是 (left, top, right, bottom)）
+        img_padded = torchvision.transforms.functional.pad(img, (pad_left, pad_top, pad_right, pad_bottom), fill=self.fill)
+        return img_padded
