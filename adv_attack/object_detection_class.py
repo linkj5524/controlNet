@@ -105,8 +105,12 @@ class ObjectDetection:
 
 
                     results = self._decode_yolo_output(out)
-                    class_id = results['labels'][0][0].detach().cpu().numpy()
-                    class_name = self.names[int(class_id)]
+                    if len(results['labels'][0])==0:
+                        class_id=None
+                        class_name=None 
+                    else:
+                        class_id = results['labels'][0][0].detach().cpu().numpy()
+                        class_name = self.names[int(class_id)]
                     
             else:
                 #抛出异常

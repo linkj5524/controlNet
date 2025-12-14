@@ -43,8 +43,8 @@ class ADV_ATTACK:
                   model_path_object_detection:str=None,
                   sam_model_type:str="vit_h",
                   sam_checkpoint_path:str="sam_vit_h_4b8939.pth",
-                  captioner_model_name:str="models\\Salesforceblip-image-captioning-large",
-                  inpaint_model_path:str="./sdxl-inpaint-model",
+                  captioner_model_name:str=r"./models/Salesforceblip-image-captioning-large",
+                  inpaint_model_path:str=r"./sdxl-inpaint-model",
                   **kwargs
                   ):
         """
@@ -73,16 +73,17 @@ class ADV_ATTACK:
             "guess_mode": False,
             "strength": 1.0,
             "scale": 9,
-            "scale_optim":2, # 优化过程的控制
+            "scale_optim":9, # 优化过程的控制
             "seed": 42,
             "eta": 0.0,
             "save_memory": True,
-            "optim_epochs":30,
-            "latent_fit_optim_epochs":10,
+            "optim_epochs":15,
+            "latent_fit_optim_epochs":5,
             "conf_threshold":0.25,
             "iou_threshold":0.1,
-            "attribution_loss_weight" :100,
+            "attribution_loss_weight" :0,
             "TV_loss_weight":10,
+            "lr":5e-2
         }
             # scale  encode 8,优化为2，目前测试效果比较好
             # 后续改成一样，效果需要试验
@@ -434,7 +435,7 @@ class ADV_ATTACK:
 
     #     mask=self.generate_mask(background_imag)
 
-    def generate_adversarial_main(self,background_imag=None, exp_path=r'./exp',params=None):
+    def generate_adversarial_main(self,background_imag=None, exp_path=r'./exp',mask_select_statues=0,params=None):
         """
         生成对抗样本
         
@@ -509,16 +510,34 @@ class ADV_ATTACK:
 
         # 填充，计算canny，返回tensor
         if masks_logic_mutil.shape[0]>1:
-            # 计算掩码区域最大的索引
-            mask_areas = masks_logic_mutil.sum(axis=(1, 2))  # 对 H 和 W 维度求和，得到每个通道的面积
+            if mask_select_statues==1:
+                # 计算掩码区域最大的索引
+                mask_areas = masks_logic_mutil.sum(axis=(1, 2))  # 对 H 和 W 维度求和，得到每个通道的面积
 
-            # 找到面积最大的通道索引
-            index = np.argmax(mask_areas)
-            print(f"index:{index},score:{scores[index]}")
-            masks_logic=masks_logic_mutil[index]
-            masks_tensor=masks_tensor_all[index]
-            mask_path=os.path.join(exp_path, 'mask.jpg')
-            tensor2picture(masks_tensor,mask_path)
+                # 找到面积最大的通道索引
+                index = np.argmax(mask_areas)
+                print(f"index:{index},score:{scores[index]}")
+                masks_logic=masks_logic_mutil[index]
+                masks_tensor=masks_tensor_all[index]
+                mask_path=os.path.join(exp_path, 'mask.jpg')
+                tensor2picture(masks_tensor,mask_path)
+            else :
+                # 选择scores最大的
+
+                # 逻辑2：选择 scores 置信度最大的（补全核心）
+                # 边界处理：防止 scores 为空/全NaN
+                if len(scores) == 0:
+                    raise ValueError("scores 数组为空，无法选择最大置信度的掩码！")
+                if np.isnan(scores).all():
+                    raise ValueError("scores 全为 NaN，无法选择最大置信度的掩码！")
+                
+                # 找到置信度最大的索引（忽略 NaN）
+                index = np.nanargmax(scores)  # nanargmax 自动跳过 NaN，比 argmax 更鲁棒
+                print(f"[置信度优先] index:{index}, score:{scores[index]}")
+                masks_logic = masks_logic_mutil[index]
+                masks_tensor = masks_tensor_all[index]
+                mask_path = os.path.join(exp_path, 'mask.jpg')
+                tensor2picture(masks_tensor, mask_path)
 
 
             
@@ -731,13 +750,14 @@ class ADV_ATTACK:
 
         latent_start=latent_start.detach().clone()
         latent_start.requires_grad = True
-        optimizer = torch.optim.Adam([latent_start], lr=5e-2)
+        optimizer = torch.optim.Adam([latent_start], lr=params["lr"])
         cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
         attr_loss_l2 = nn.MSELoss()
         TV_Loss=TVLoss()
         #开始步骤
         t_start=self.ddim_sampler.ddim_timesteps[-1]
-        for epoch in range(params["optim_epochs"]):
+        pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
+        for epoch in pbar:
             # 循环，优化
             end_latent=self.ddim_sampler.decode(  latent_start, cond, t_start, unconditional_guidance_scale=params["scale_optim"], unconditional_conditioning=un_cond,
                 use_original_steps=False, callback=None)
@@ -747,7 +767,8 @@ class ADV_ATTACK:
             # 转换成图片
             image=self.latent_to_imgTensor01(end_latent)
             image_object_on_background=self.batched_tensor_mask_overlay(background_imag,image,masks_logic)
-            # result_temp,_=self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
+            generate_image_path=os.path.join(exp_path, 'result_generate.jpg')
+            result_temp,_=self.object_detection.detect(image,file_path=generate_image_path,grad_status=True)
             # 目标检测模型的输出
             temp_path=os.path.join(exp_path, 'result_temp.jpg')
             result,_  =self.object_detection.detect(image_object_on_background,file_path=temp_path,grad_status=True)
@@ -809,7 +830,7 @@ class ADV_ATTACK:
         
         return 
 
-    def generate_adversarial_main_all_mask(self,background_imag=None, exp_path=r'./exp',params=None):
+    def generate_adversarial_main_all_mask(self,background_imag=None, exp_path=r'./exp',mask_select_statues=0,params=None):
         """
         生成对抗样本
         
@@ -884,16 +905,34 @@ class ADV_ATTACK:
 
         # 填充，计算canny，返回tensor
         if masks_logic_mutil.shape[0]>1:
-            # 计算掩码区域最大的索引
-            mask_areas = masks_logic_mutil.sum(axis=(1, 2))  # 对 H 和 W 维度求和，得到每个通道的面积
+            if mask_select_statues==1:
+                # 计算掩码区域最大的索引
+                mask_areas = masks_logic_mutil.sum(axis=(1, 2))  # 对 H 和 W 维度求和，得到每个通道的面积
 
-            # 找到面积最大的通道索引
-            index = np.argmax(mask_areas)
-            print(f"index:{index},score:{scores[index]}")
-            masks_logic=masks_logic_mutil[index]
-            masks_tensor=masks_tensor_all[index]
-            mask_path=os.path.join(exp_path, 'mask.jpg')
-            tensor2picture(masks_tensor,mask_path)
+                # 找到面积最大的通道索引
+                index = np.argmax(mask_areas)
+                print(f"index:{index},score:{scores[index]}")
+                masks_logic=masks_logic_mutil[index]
+                masks_tensor=masks_tensor_all[index]
+                mask_path=os.path.join(exp_path, 'mask.jpg')
+                tensor2picture(masks_tensor,mask_path)
+            else :
+                # 选择scores最大的
+
+                # 逻辑2：选择 scores 置信度最大的（补全核心）
+                # 边界处理：防止 scores 为空/全NaN
+                if len(scores) == 0:
+                    raise ValueError("scores 数组为空，无法选择最大置信度的掩码！")
+                if np.isnan(scores).all():
+                    raise ValueError("scores 全为 NaN，无法选择最大置信度的掩码！")
+                
+                # 找到置信度最大的索引（忽略 NaN）
+                index = np.nanargmax(scores)  # nanargmax 自动跳过 NaN，比 argmax 更鲁棒
+                print(f"[置信度优先] index:{index}, score:{scores[index]}")
+                masks_logic = masks_logic_mutil[index]
+                masks_tensor = masks_tensor_all[index]
+                mask_path = os.path.join(exp_path, 'mask.jpg')
+                tensor2picture(masks_tensor, mask_path)
 
 
         # 创建mask_logic_temp,里面全是True,numpy
@@ -1052,13 +1091,14 @@ class ADV_ATTACK:
 
         latent_start=latent_start.detach().clone()
         latent_start.requires_grad = True
-        optimizer = torch.optim.Adam([latent_start], lr=5e-2)
+        optimizer = torch.optim.Adam([latent_start], lr=params["lr"])
         cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
         attr_loss_l2 = nn.MSELoss()
         TV_Loss=TVLoss()
         #开始步骤
         t_start=self.ddim_sampler.ddim_timesteps[-1]
-        for epoch in range(params["optim_epochs"]):
+        pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
+        for epoch in pbar:
             # 循环，优化
             end_latent=self.ddim_sampler.decode(  latent_start, cond, t_start, unconditional_guidance_scale=params["scale_optim"], unconditional_conditioning=un_cond,
                 use_original_steps=False, callback=None)
@@ -1068,7 +1108,8 @@ class ADV_ATTACK:
             # 转换成图片
             image=self.latent_to_imgTensor01(end_latent)
             image_object_on_background=self.batched_tensor_mask_overlay(background_imag,image,masks_logic)
-            # result_temp,_=self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
+            generate_image_path=os.path.join(exp_path, 'result_generate.jpg')
+            result_temp,_=self.object_detection.detect(image,file_path=generate_image_path,grad_status=True)
             # 目标检测模型的输出
             temp_path=os.path.join(exp_path, 'result_temp.jpg')
             result,_  =self.object_detection.detect(image_object_on_background,file_path=temp_path,grad_status=True)
@@ -1109,7 +1150,7 @@ class ADV_ATTACK:
             ( params['TV_loss_weight'] *tv_loss+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
 
                           
-
+               
             optimizer.step()
             # 手动清理变量，帮助回收内存
             del loss,loss_dict,tv_loss,attr_loss
@@ -1118,10 +1159,10 @@ class ADV_ATTACK:
 
         # image_tensor=self.latent_to_imgTensor01(end_latent)
 
-        # image1=self.tensor_01_to_numpy_255(image_tensor)
+        image_adv=self.tensor_01_to_numpy_255(image_object_on_background)
         # 保存对抗样本
         adv_path=os.path.join(exp_path, 'adv_example.jpg')
-        cv2.imwrite(adv_path,image_object_on_background)
+        cv2.imwrite(adv_path,image_adv)
 
 
 

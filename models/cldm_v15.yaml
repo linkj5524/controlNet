@@ -79,7 +79,7 @@ model:
       target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
       # 删除params及其内容，可自动下载模型
       params:
-        version: "models\\clip-vit-large-patch14"
+        version: "models/clip_vit_large_patch14"
         # t5_version: "models\\googlet5-v1_1-xl"
 
 
