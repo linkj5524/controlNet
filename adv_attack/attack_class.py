@@ -830,7 +830,7 @@ class ADV_ATTACK:
         
         return 
 
-    def generate_adversarial_main_all_mask(self,background_imag=None, exp_path=r'./exp',mask_select_statues=0,params=None):
+    def generate_adversarial_main_all_mask(self,background_imag=None, exp_path=r'./exp',images_path=None,mask_select_statues=0,params=None):
         """
         生成对抗样本
         
@@ -859,8 +859,9 @@ class ADV_ATTACK:
         # background——image 的文本描述提取
         blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
         background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
+
         print(f"\n背景图像描述: {background_imag_caption}")
-        destroy_image_captioner(blip_model)
+        destroy_image_captioner(blip_model) 
 
 
 
@@ -870,11 +871,19 @@ class ADV_ATTACK:
        # detect model 初始化
         self.init_object_detection()
         if background_imag.ndim == 3:
-            background_imag_temp=background_imag.unsqueeze(0)
-        else:
-            background_imag_temp=background_imag
-        ref_detect_path=os.path.join(exp_path, 'background_detect.jpg')
-        result_gt,object_class =self.object_detection.detect(background_imag_temp,file_path=ref_detect_path,grad_status=True)
+            background_imag=background_imag.unsqueeze(0)
+
+        all_exp_root=[]
+        for image_name,background_imag_temp in zip(images_path,background_imag):
+                    # 获取图片文件名,去除后缀
+            image_name = os.path.splitext(os.path.basename(image_name))[0]
+
+            exp_root_dir=os.path.join(exp_path,f"{image_name}")
+            os.makedirs(exp_root_dir,exist_ok=True)
+            
+            ref_detect_path=os.path.join(exp_root_dir, 'background_detect.jpg')
+            result_gt,object_class =self.object_detection.detect(background_imag_temp,file_path=ref_detect_path,grad_status=True)
+            all_exp_root.append(exp_root_dir)
         
 
 
