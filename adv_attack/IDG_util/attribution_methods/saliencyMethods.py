@@ -6,78 +6,181 @@ import os
 # ------------------------------
 # 1. 适配 ObjectDetection 类的 IG/IDG 核心函数
 # ------------------------------
+# def IG_Detection(
+#     input_img,  # 输入图像张量 (b, 3, H, W)，归一化到 0-1（符合 ObjectDetection 输入要求）
+#     det_model,  # 你的 ObjectDetection 实例
+#     steps=50,
+#     batch_size=10,
+#     alpha_star=1.0,
+#     baseline=0.0,  # 基线图像（0=全黑，可传入张量）
+#     target_obj_idx=0  # 要归因的目标索引（检测结果中第几个目标，默认第1个）
+# ):
+#     """
+#     适配目标检测的集成梯度（IG/LIG）归因方法
+#     核心：对检测结果中特定目标的类别置信度进行归因
+#     """
+#     device = det_model.device
+#     if steps % batch_size != 0:
+#         print(f"Error: steps ({steps}) must be divisible by batch_size ({batch_size})!")
+#         return None
+
+#     loops = int(steps / batch_size)
+
+#     # 生成基线图像（适配输入尺寸和设备）
+#     if torch.is_tensor(baseline):
+#         baseline = baseline.to(device).float()
+#         assert baseline.shape == input_img.shape, "Baseline shape must match input shape!"
+#     else:
+#         baseline = torch.full(input_img.shape, baseline, dtype=torch.float, device=device)
+
+#     input_img = input_img.to(device)
+#     baseline_diff = input_img - baseline  # 输入与基线的差值
+
+#     # 生成插值系数（0→1）
+#     alphas = torch.linspace(0, 1, steps, device=device).reshape(steps, 1, 1, 1)
+#     alphas.requires_grad = True
+
+#     # 存储梯度、目标置信度
+#     gradients = torch.zeros((steps, input_img.shape[1], input_img.shape[2], input_img.shape[3]), device=device)
+#     target_scores = torch.zeros(steps, device=device)  # 存储特定目标的类别置信度
+
+#     # 批量计算插值图像的梯度和置信度
+#     for i in range(loops):
+#         start = i * batch_size
+#         end = (i + 1) * batch_size
+
+#         # 生成插值图像（baseline + alpha * (input - baseline)）
+#         interp_imgs = baseline + alphas[start:end] * baseline_diff
+
+#         # 计算当前批次的梯度和目标置信度
+#         batch_grads, batch_scores = getGradientsDetection(interp_imgs, det_model, target_obj_idx)
+#         gradients[start:end] = batch_grads
+#         target_scores[start:end] = batch_scores
+
+#     # 计算 IG/LIG 梯度积分
+#     if alpha_star == 1.0:
+#         # IG：积分所有步骤
+#         integrated_grads = gradients.mean(dim=0)
+#     else:
+#         # LIG：积分到置信度达到 max_score * alpha_star 的步骤
+#         max_score = torch.max(target_scores)
+#         cutoff_score = max_score * alpha_star
+#         cutoff_steps = torch.where(target_scores > cutoff_score)[0]
+
+#         # 处理无有效截断点的情况
+#         cutoff_step = cutoff_steps[0] if len(cutoff_steps) > 0 else 1
+#         cutoff_step = max(cutoff_step, 1)  # 避免截断点为0
+
+#         # 积分前 cutoff_step 个步骤
+#         integrated_grads = gradients[:cutoff_step].mean(dim=0)
+
+#     # 最终归因值 = 积分梯度 * (输入 - 基线)
+#     attributions = integrated_grads * baseline_diff[0]  # (3, H, W)
+#     return attributions.squeeze()  # (3, H, W) 或 (H, W)（若单通道）
+
 def IG_Detection(
-    input_img,  # 输入图像张量 (1, 3, H, W)，归一化到 0-1（符合 ObjectDetection 输入要求）
-    det_model,  # 你的 ObjectDetection 实例
+    input_img,  # 输入图像张量 (B, 3, H, W)，归一化到 0-1
+    det_model,  # ObjectDetection 实例
     steps=50,
     batch_size=10,
     alpha_star=1.0,
-    baseline=0.0,  # 基线图像（0=全黑，可传入张量）
-    target_obj_idx=0  # 要归因的目标索引（检测结果中第几个目标，默认第1个）
+    baseline=0.0,  # 基线图像（0=全黑，可传入(B,3,H,W)张量）
+    target_obj_idx=0  # 要归因的目标索引（每个batch内的第几个目标）
 ):
     """
-    适配目标检测的集成梯度（IG/LIG）归因方法
+    适配目标检测的集成梯度（IG/LIG）归因方法（支持多batch）
     核心：对检测结果中特定目标的类别置信度进行归因
+    
+    Args:
+        input_img: (B, 3, H, W) 输入图像张量
+        det_model: 目标检测模型实例
+        steps: 插值步数
+        batch_size: 批量计算的步长
+        alpha_star: LIG截断系数（1.0=标准IG）
+        baseline: 基线值/张量（标量或(B,3,H,W)张量）
+        target_obj_idx: 每个batch内要归因的目标索引
+    
+    Returns:
+        attributions: (B, 3, H, W) 多batch的归因结果
     """
     device = det_model.device
+    B, C, H, W = input_img.shape  # 获取batch_size和图像维度
+    
+    # 输入校验
     if steps % batch_size != 0:
         print(f"Error: steps ({steps}) must be divisible by batch_size ({batch_size})!")
         return None
-
     loops = int(steps / batch_size)
 
-    # 生成基线图像（适配输入尺寸和设备）
+    # 生成基线图像（适配多batch）
     if torch.is_tensor(baseline):
         baseline = baseline.to(device).float()
-        assert baseline.shape == input_img.shape, "Baseline shape must match input shape!"
+        assert baseline.shape == input_img.shape, f"Baseline shape {baseline.shape} must match input shape {input_img.shape}!"
     else:
-        baseline = torch.full(input_img.shape, baseline, dtype=torch.float, device=device)
+        baseline = torch.full((B, C, H, W), baseline, dtype=torch.float, device=device)
 
     input_img = input_img.to(device)
-    baseline_diff = input_img - baseline  # 输入与基线的差值
+    baseline_diff = input_img - baseline  # (B, 3, H, W) 每个batch的输入与基线差值
 
-    # 生成插值系数（0→1）
-    alphas = torch.linspace(0, 1, steps, device=device).reshape(steps, 1, 1, 1)
+    # 生成插值系数（0→1）：(steps, 1, 1, 1, 1) 适配广播到 (steps, B, 3, H, W)
+    alphas = torch.linspace(0, 1, steps, device=device).reshape(steps, 1, 1, 1, 1)
     alphas.requires_grad = True
 
-    # 存储梯度、目标置信度
-    gradients = torch.zeros((steps, input_img.shape[1], input_img.shape[2], input_img.shape[3]), device=device)
-    target_scores = torch.zeros(steps, device=device)  # 存储特定目标的类别置信度
+    # 存储梯度：(steps, B, 3, H, W) → 新增batch维度
+    gradients = torch.zeros((steps, B, C, H, W), device=device)
+    # 存储目标置信度：(steps, B) → 每个step、每个batch的目标置信度
+    target_scores = torch.zeros((steps, B), device=device)
 
     # 批量计算插值图像的梯度和置信度
     for i in range(loops):
         start = i * batch_size
         end = (i + 1) * batch_size
+        current_alphas = alphas[start:end]  # (batch_size, 1, 1, 1, 1)
 
-        # 生成插值图像（baseline + alpha * (input - baseline)）
-        interp_imgs = baseline + alphas[start:end] * baseline_diff
+        # 生成插值图像：(batch_size, B, 3, H, W)
+        interp_imgs = baseline + current_alphas * baseline_diff  # 广播适配
 
-        # 计算当前批次的梯度和目标置信度
-        batch_grads, batch_scores = getGradientsDetection(interp_imgs, det_model, target_obj_idx)
+        # 展开维度用于模型推理：(batch_size*B, 3, H, W)
+        interp_imgs_flat = interp_imgs.reshape(-1, C, H, W)
+        
+        # 计算当前批次的梯度和目标置信度（需确保getGradientsDetection支持多batch）
+        batch_grads_flat, batch_scores_flat = getGradientsDetection(
+            interp_imgs_flat, det_model, target_obj_idx
+        )
+        
+        # 恢复维度：(batch_size, B, 3, H, W)
+        batch_grads = batch_grads_flat.reshape(batch_size, B, C, H, W)
+        # 恢复维度：(batch_size, B)
+        batch_scores = batch_scores_flat.reshape(batch_size, B)
+
         gradients[start:end] = batch_grads
         target_scores[start:end] = batch_scores
 
-    # 计算 IG/LIG 梯度积分
+    # 计算 IG/LIG 梯度积分（按batch维度分别计算）
     if alpha_star == 1.0:
-        # IG：积分所有步骤
+        # IG：对steps维度求平均 → (B, 3, H, W)
         integrated_grads = gradients.mean(dim=0)
     else:
-        # LIG：积分到置信度达到 max_score * alpha_star 的步骤
-        max_score = torch.max(target_scores)
-        cutoff_score = max_score * alpha_star
-        cutoff_steps = torch.where(target_scores > cutoff_score)[0]
+        # LIG：每个batch独立计算截断点
+        integrated_grads = torch.zeros((B, C, H, W), device=device)
+        max_scores = torch.max(target_scores, dim=0)[0]  # (B,) 每个batch的最大置信度
+        cutoff_scores = max_scores * alpha_star  # (B,) 每个batch的截断阈值
 
-        # 处理无有效截断点的情况
-        cutoff_step = cutoff_steps[0] if len(cutoff_steps) > 0 else 1
-        cutoff_step = max(cutoff_step, 1)  # 避免截断点为0
+        for b in range(B):
+            # 找到当前batch的截断步长
+            batch_scores = target_scores[:, b]
+            cutoff_steps = torch.where(batch_scores > cutoff_scores[b])[0]
+            
+            # 处理无有效截断点的情况
+            cutoff_step = cutoff_steps[0] if len(cutoff_steps) > 0 else 1
+            cutoff_step = max(cutoff_step, 1)  # 避免截断点为0
+            
+            # 积分前cutoff_step个步骤 → (3, H, W)
+            integrated_grads[b] = gradients[:cutoff_step, b].mean(dim=0)
 
-        # 积分前 cutoff_step 个步骤
-        integrated_grads = gradients[:cutoff_step].mean(dim=0)
-
-    # 最终归因值 = 积分梯度 * (输入 - 基线)
-    attributions = integrated_grads * baseline_diff[0]  # (3, H, W)
-    return attributions.squeeze()  # (3, H, W) 或 (H, W)（若单通道）
-
+    # 最终归因值：每个batch独立计算 (B, 3, H, W)
+    attributions = integrated_grads * baseline_diff  # (B, 3, H, W)
+    return attributions  # 返回多batch结果 (B, 3, H, W)
 
 def IDG_Detection(
     input_img,
@@ -173,7 +276,7 @@ def getGradientsDetection(interp_imgs, det_model, target_obj_idx):
     # 批量推理（一次处理整个批次，提升效率）
     for i in range(batch_size):
         img = interp_imgs[i:i+1]  # 取单个图像 (1, 3, H, W)，仍共享批量张量的梯度
-        results = det_model.detect_return_dict(img, grad_status=True)
+        results,_ = det_model.detect(img, grad_status=True)
 
         # 提取特定目标的类别置信度（若检测不到目标，置信度设为0）
         if len(results['scores'][0]) <= target_obj_idx:
@@ -385,30 +488,33 @@ def visualize_attribution(input_img, attributions, save_path="attribution_result
     :param save_path: 保存路径
     """
     # 处理输入图像（张量→numpy）
-    input_img = input_img.squeeze().permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
-    input_img = (input_img * 255).astype(np.uint8)  # 反归一化
-    input_img = cv2.cvtColor(input_img, cv2.COLOR_RGB2BGR)  # RGB→BGR（适配OpenCV）
+    for i in range(input_img.shape[0]):  # 批量处理
+        input_img_b= input_img[i]
+        attributions_b= attributions[i]
+        input_img_b = input_img_b.permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
+        input_img_b = (input_img_b * 255).astype(np.uint8)  # 反归一化
+        input_img_b = cv2.cvtColor(input_img_b, cv2.COLOR_RGB2BGR)  # RGB→BGR（适配OpenCV）
 
-    # 处理归因结果（多通道→单通道热力图）
-    if len(attributions.shape) == 3:
-        attributions = torch.abs(attributions).sum(dim=0)  # 按通道取绝对值求和
-    attributions = attributions.detach().cpu().numpy()
+        # 处理归因结果（多通道→单通道热力图）
+        if len(attributions_b.shape) == 3:
+            attributions_b = torch.abs(attributions_b).sum(dim=0)  # 按通道取绝对值求和
+        attributions_b = attributions_b.detach().cpu().numpy()
 
-    # 归一化到 [0, 255]
-    attributions = (attributions - attributions.min()) / (attributions.max() - attributions.min() + 1e-8)
-    attributions = (attributions * 255).astype(np.uint8)
+        # 归一化到 [0, 255]
+        attributions_b = (attributions_b - attributions_b.min()) / (attributions_b.max() - attributions_b.min() + 1e-8)
+        attributions_b = (attributions_b * 255).astype(np.uint8)
 
-    # 生成彩色热力图
-    heatmap = cv2.applyColorMap(attributions, cv2.COLORMAP_JET)
-    # 叠加原始图像和热力图
-    overlay = cv2.addWeighted(input_img, 0.6, heatmap, 0.4, 0)
+        # 生成彩色热力图
+        heatmap = cv2.applyColorMap(attributions_b, cv2.COLORMAP_JET)
+        # 叠加原始图像和热力图
+        overlay = cv2.addWeighted(input_img_b, 0.6, heatmap, 0.4, 0)
 
-    # 保存结果
-    attribution_path = os.path.join(save_path, file_name_pre+'_attribution.jpg')
-    attribution_path_cmp = os.path.join(save_path, file_name_pre+'_attribution_cmp.jpg')
-    cv2.imwrite(attribution_path,heatmap )
-    cv2.imwrite(attribution_path_cmp, np.hstack([input_img, heatmap, overlay]))
-    print(f"Attribution visualization saved to {save_path}")
+        # 保存结果
+        attribution_path = os.path.join(save_path[i], file_name_pre+'_attribution.jpg')
+        attribution_path_cmp = os.path.join(save_path[i], file_name_pre+'_attribution_cmp.jpg')
+        cv2.imwrite(attribution_path,heatmap )
+        cv2.imwrite(attribution_path_cmp, np.hstack([input_img_b, heatmap, overlay]))
+        print(f"Attribution visualization saved to {save_path[i]}")
 
 
 # ------------------------------

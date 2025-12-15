@@ -34,7 +34,7 @@ def init_image_captioner(model_name="Salesforce/blip-image-captioning-large", de
     print("图像描述模型初始化完成")
     return model, processor, _device
 
-def image_captioner_process(model, processor, device, image_tensor, max_length=50, num_beams=4, temperature=1.0):
+def image_captioner_process(model, processor, device, image_tensors, max_length=50, num_beams=4, temperature=1.0):
     """
     处理Tensor格式的图像，生成文本描述
     
@@ -54,10 +54,17 @@ def image_captioner_process(model, processor, device, image_tensor, max_length=5
         raise RuntimeError("模型未正确初始化")
     
     # 将Tensor转换为PIL Image
-    if isinstance(image_tensor, torch.Tensor):
+    if isinstance(image_tensors, torch.Tensor):
         # 如果是批量数据，取第一个样本
-        if len(image_tensor.shape) == 4:
-            image_tensor = image_tensor[0]
+        if len(image_tensors.shape) == 3:
+            image_tensors=image_tensors.unsqueeze(0)
+            
+        
+    else:
+        raise TypeError(f"不支持的图像类型: {type(image_tensors)}")
+    caption_list=[]
+    for i in range(image_tensors.shape[0]): 
+        image_tensor = image_tensors[i]  
         
         # 转换为numpy数组
         img_np = image_tensor.cpu().detach().numpy()
@@ -75,45 +82,29 @@ def image_captioner_process(model, processor, device, image_tensor, max_length=5
             img_np = np.squeeze(img_np, axis=-1)
         
         image = Image.fromarray(img_np)
-    
-    elif isinstance(image_tensor, np.ndarray):
-        # 直接从numpy数组创建Image
-        if image_tensor.max() <= 1.0:
-            image_tensor = (image_tensor * 255).astype(np.uint8)
-        image = Image.fromarray(image_tensor)
-    
-    elif isinstance(image_tensor, Image.Image):
-        # 已经是PIL Image
-        image = image_tensor
-    
-    else:
-        raise TypeError(f"不支持的图像类型: {type(image_tensor)}")
-    
-    # 确保是RGB格式
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
-    
-    # 图像预处理
-    inputs = processor(images=image, return_tensors="pt").to(device)
-    
-    # 若使用半精度
-    if device == "cuda":
-        inputs = {k: v.half() for k, v in inputs.items()}
-    
-    # 生成文本描述
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_length=max_length,
-            num_beams=num_beams,
-            temperature=temperature,
-            top_p=0.9,
-            repetition_penalty=1.2
-        )
-    
-    # 解码生成的文本
-    caption = processor.decode(outputs[0], skip_special_tokens=True)
-    return caption
+        # 图像预处理
+        inputs = processor(images=image, return_tensors="pt").to(device)
+        
+        # 若使用半精度
+        if device == "cuda":
+            inputs = {k: v.half() for k, v in inputs.items()}
+        
+        # 生成文本描述
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_length=max_length,
+                num_beams=num_beams,
+                temperature=temperature,
+                top_p=0.9,
+                repetition_penalty=1.2
+            )
+        
+        # 解码生成的文本
+        caption = processor.decode(outputs[0], skip_special_tokens=True)   
+        caption_list.append(caption) 
+
+    return caption_list
 
 def destroy_image_captioner(model):
     """
