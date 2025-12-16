@@ -40,6 +40,7 @@ share/python-wheels/
 sdxl-inpaint-model/
 models/
 exp/
+data/
 *.egg-info/
 .installed.cfg
 *.egg
