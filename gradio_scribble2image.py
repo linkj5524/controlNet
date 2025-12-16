@@ -91,12 +91,12 @@ if __name__=='__main__':
 
     #参数
     # 定义提示词
-    prompt = "a handsome boy with a long hair "
+    prompt = ""
     a_prompt = ""
     n_prompt = ""
 
     # 设置参数
-    num_samples = 2               # 生成图像数量
+    num_samples = 1               # 生成图像数量
     image_resolution = 512        # 图像分辨率
     ddim_steps = 10              # 采样步数
     guess_mode = False            # 是否使用猜测模式
@@ -105,7 +105,8 @@ if __name__=='__main__':
     seed = 42                     # 随机种子（用于结果可复现）
     eta = 0.0                     # DDIM采样器的eta参数
 
-    img=cv2.imread('test_imgs\human_line.png')
+    # img=cv2.imread('test_imgs\human_line.png')
+    img=cv2.imread(r'exp\1213\000000363875\control.jpg')
     img=cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
     # 调用函数
     resu = process(

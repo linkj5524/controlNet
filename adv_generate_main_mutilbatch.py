@@ -35,7 +35,7 @@ from adv_attack.util import *
 
 if __name__ == '__main__':
     # --------------------------
-    # 1. 基础配置
+    # 1. 基础配置 
     # --------------------------
 
     root_path=os.path.dirname(__file__)
@@ -43,6 +43,7 @@ if __name__ == '__main__':
     model_path=os.path.join(os.path.join(root_path,'models'),'yolo11n.pt')
     sam_path=os.path.join(os.path.join(root_path,'models'),'sam_vit_h_4b8939.pth')
     controlNet_model_path=os.path.join(os.path.join(root_path,'models'),'control_sd15_canny.pth')
+    # controlNet_model_path=os.path.join(os.path.join(root_path,'models'),'control_sd15_scribble.pth')
     blip_model_path=os.path.join(os.path.join(root_path,'models'),'Salesforceblip_image_captioning_large')
     attack = ADV_ATTACK(device=torch.device("cuda"),model_path=controlNet_model_path,
                         model_path_object_detection=model_path,sam_model_type='vit_h',
@@ -55,8 +56,9 @@ if __name__ == '__main__':
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = 1 
-    IMG_SIZE = 512  
+    IMG_SIZE = 256  
     IMG_ROOT = r"data/select_coco"  # 整理后的验证集根目录
+    IMG_ROOT=r"D:\FILELin\postgraduate\little_paper\coco\val2017\select_coco"
 
     # --------------------------
     # 2. 验证集预处理（无数据增强！）
@@ -95,24 +97,22 @@ if __name__ == '__main__':
     # --------------------------
 
 
- 
+    exp_root=os.path.join(root_path,'exp/1213')
+    # 获取图片文件名,去除后缀
+
+    os.makedirs(exp_root,exist_ok=True) 
 
     for batch_idx, (images, images_path) in enumerate(img_loader):
-        exp_root=os.path.join(root_path,'exp/1213')
-        # 获取图片文件名,去除后缀
-        image_name = os.path.splitext(os.path.basename(images_path[0]))[0]
-        # image_name = os.path.basename(images_path[0])
-        exp_path=os.path.join(exp_root,f"{image_name}")
-        os.makedirs(exp_path,exist_ok=True)
+
         start_time = time.time()
-        # attack.generate_adversarial_main_all_mask(images,exp_path=exp_path,mask_select_statues=1)
-  
-        # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
-        try:
-            # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
-            attack.generate_adversarial_main_all_mask(images,exp_path=exp_path,mask_select_statues=0)
-        except:
-            print(f"{image_name} error")
+        attack.generate_adversarial_main_all_mask(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
+        # attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
+        # # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
+        # try:
+        #     # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
+        #     attack.generate_adversarial_main_all_mask(images,exp_path=exp_path,mask_select_statues=0)
+        # except:
+        #     print(f"{image_name} error")
         
         end_time = time.time()
         elapsed_time = end_time - start_time
