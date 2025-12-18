@@ -489,8 +489,8 @@ def visualize_attribution(input_img, attributions, save_path="attribution_result
     """
     # 处理输入图像（张量→numpy）
     for i in range(input_img.shape[0]):  # 批量处理
-        input_img_b= input_img[i]
-        attributions_b= attributions[i]
+        input_img_b= input_img[i].detach()
+        attributions_b= attributions[i].detach()
         input_img_b = input_img_b.permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
         input_img_b = (input_img_b * 255).astype(np.uint8)  # 反归一化
         input_img_b = cv2.cvtColor(input_img_b, cv2.COLOR_RGB2BGR)  # RGB→BGR（适配OpenCV）

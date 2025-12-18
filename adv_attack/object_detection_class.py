@@ -489,7 +489,8 @@ class ObjectDetection:
         # --------------------------
         # 3. 提取每个batch的主类别（置信度最高）
         # --------------------------
-        class_names = self._get_main_class_per_batch(results)
+        # class_names = self._get_main_class_per_batch(results)
+        class_names=self._get_class_per_batch(results)
 
         # --------------------------
         # 4. 多batch结果可视化保存
@@ -531,7 +532,28 @@ class ObjectDetection:
             raise ValueError(f"Unsupported input type: {type(img)} (expected np.ndarray or torch.Tensor)")
 
         return img_tensor
+    def _get_class_per_batch(self, results: Dict[str, List[torch.Tensor]]) -> List[Optional[str]]:
+        """
+        提取每个batch置信度最高的类别名称
+        :param results: 解码后的检测结果
+        :return: 长度=B的类别名称列表（无检测则为None）
+        """
+        class_names = []
+        batch_size = len(results['boxes'])
 
+        for b in range(batch_size):
+            labels = results['labels'][b]
+            
+            if len(labels) == 0:
+                class_names.append(None)
+                continue
+            
+            # 取置所有类别name
+            names = [self.names[int(label)] for label in labels]
+
+            class_names.append(names)
+
+        return class_names
     def _get_main_class_per_batch(self, results: Dict[str, List[torch.Tensor]]) -> List[Optional[str]]:
         """
         提取每个batch置信度最高的类别名称

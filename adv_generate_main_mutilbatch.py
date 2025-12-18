@@ -56,7 +56,7 @@ if __name__ == '__main__':
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = 1 
-    IMG_SIZE = 256  
+    IMG_SIZE = 512  
     IMG_ROOT = r"data/select_coco"  # 整理后的验证集根目录
     IMG_ROOT=r"D:\FILELin\postgraduate\little_paper\coco\val2017\select_coco"
 
@@ -105,14 +105,15 @@ if __name__ == '__main__':
     for batch_idx, (images, images_path) in enumerate(img_loader):
 
         start_time = time.time()
-        attack.generate_adversarial_main_all_mask(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
-        # attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
-        # # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
+        # attack.generate_adversarial_main_all_mask(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
+        attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
+        # # # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
         # try:
         #     # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
-        #     attack.generate_adversarial_main_all_mask(images,exp_path=exp_path,mask_select_statues=0)
+        #     # attack.generate_adversarial_main_all_mask(images,exp_path=exp_path,mask_select_statues=0)
+        #     attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
         # except:
-        #     print(f"{image_name} error")
+        #     print("error")
         
         end_time = time.time()
         elapsed_time = end_time - start_time

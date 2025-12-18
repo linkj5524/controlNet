@@ -96,98 +96,191 @@ def destroy_sam(sam_predictor):
 import numpy as np
 import torch
 
-def segment_tensor(predictor, tensor_img, input_points_batch=None, input_labels_batch=None, mutil_mask=True):
-    """
-    支持多batch处理的SAM分割函数
+# def segment_tensor(predictor, tensor_img, input_points_batch=None, input_labels_batch=None, mutil_mask=True):
+#     """
+#     支持多batch处理的SAM分割函数
     
-    Args:
-        predictor: SAM预测器实例
-        tensor_img: 输入图像，格式为 BCHW（batch, channel=3, height, width），值范围 0-1
-        input_points_batch: 引导点坐标的batch列表，格式为 [[[x1, y1], [x2, y2]], [[x3, y3]]] 
-                            每个元素对应一个batch的引导点，None表示该batch无引导点
-        input_labels_batch: 点标签的batch列表（1=前景，0=背景），格式为 [[1,0], [1]]
-                            每个元素对应一个batch的点标签
-        mutil_mask: 是否返回多个掩码
+#     Args:
+#         predictor: SAM预测器实例
+#         tensor_img: 输入图像，格式为 BCHW（batch, channel=3, height, width），值范围 0-1
+#         input_points_batch: 引导点坐标的batch列表，格式为 [[[x1, y1], [x2, y2]], [[x3, y3]]] 
+#                             每个元素对应一个batch的引导点，None表示该batch无引导点
+#         input_labels_batch: 点标签的batch列表（1=前景，0=背景），格式为 [[1,0], [1]]
+#                             每个元素对应一个batch的点标签
+#         mutil_mask: 是否返回多个掩码
     
-    Returns:
-        - imgs_np: 输入图像列表，每个元素为numpy数组 (H, W, 3)，值范围 0-255
-        - masks_list: 分割掩码列表，每个元素为numpy数组 (num_masks, H, W)
-        - masks_tensors: 转换为tensor的分割掩码列表，每个元素形状为 (num_masks, H, W)
-        - scores_list: 掩码置信度分数列表，每个元素为numpy数组 (num_masks,)
+#     Returns:
+#         - imgs_np: 输入图像列表，每个元素为numpy数组 (H, W, 3)，值范围 0-255
+#         - masks_list: 分割掩码列表，每个元素为numpy数组 (num_masks, H, W)
+#         - masks_tensors: 转换为tensor的分割掩码列表，每个元素形状为 (num_masks, H, W)
+#         - scores_list: 掩码置信度分数列表，每个元素为numpy数组 (num_masks,)
+#     """
+#     # 初始化返回列表
+#     imgs_np_list = []
+#     masks_list = []
+#     masks_tensors_list = []
+#     scores_list = []
+    
+#     # 获取batch大小
+#     batch_size = tensor_img.shape[0]
+#     _, C, H, W = tensor_img.shape
+#     if input_labels_batch is None:
+#         input_labels_batch = [None] * batch_size
+    
+#     # 确保引导点和标签的长度匹配batch size
+#     assert len(input_points_batch) == batch_size, \
+#         f"input_points_batch长度({len(input_points_batch)})应等于batch size({batch_size})"
+#     assert len(input_labels_batch) == batch_size, \
+#         f"input_labels_batch长度({len(input_labels_batch)})应等于batch size({batch_size})"
+    
+#     # 遍历每个batch处理
+#     for i in range(batch_size):
+#         # 获取当前batch的图像
+#         img_tensor = tensor_img[i]  # CHW格式
+        
+#         # 转换为SAM所需格式：HWC, 0-255, uint8
+#         img_np_i = img_tensor.permute(1, 2, 0).cpu().numpy()  # CHW -> HWC
+#         img_np_i = (img_np_i * 255).astype(np.uint8)  # 0-1 -> 0-255
+        
+#         # 设置当前图像到SAM预测器
+#         predictor.set_image(img_np_i)
+        
+#         # 处理当前batch的引导点和标签
+#         input_point = input_points_batch[i]
+#         input_label = input_labels_batch[i]
+        
+#         if len(input_point)>0 :
+#             input_point = np.array(input_point)
+#             # 如果标签未提供，默认全部为前景(1)
+#             if input_label is None:
+#                 input_label = np.array([1] * len(input_point))
+#             else:
+#                 input_label = np.array(input_label)
+
+        
+#             # 预测分割掩码
+#             masks, scores, logits = predictor.predict(
+#                 point_coords=input_point,
+#                 point_labels=input_label,
+#                 multimask_output=mutil_mask
+#             )
+#         else:
+#             # 没有，则默认为全部为前景
+            
+#             # 无引导点的情况：生成全前景掩码（形状与SAM输出对齐）
+#             num_masks = 3 if mutil_mask else 1  # 匹配SAM的multimask_output行为
+#             # 创建全1掩码 (num_masks, H, W)
+#             masks = np.ones((num_masks, H, W), dtype=np.bool_)  # 掩码用布尔型更高效
+#             # 生成默认置信度分数（模拟SAM输出）
+#             scores = np.array([1.0] * num_masks)  # 全1表示最高置信度
+#             # 生成空logits（保持与predict输出格式一致）
+#             logits = np.zeros((num_masks, H, W), dtype=np.float32)
+
+#         # 转换掩码为tensor,detach
+        
+#         masks_tensor = torch.from_numpy(masks).float()  # (num_masks, H, W)
+#         masks_tensor = masks_tensor.detach()
+#         # 将结果添加到列表
+#         imgs_np_list.append(img_np_i)
+#         masks_list.append(masks)
+        
+#         masks_tensors_list.append(masks_tensor)
+#         scores_list.append(scores)
+#     masks_tensors=torch.stack(masks_tensors_list)
+#     imgs_np=np.stack(imgs_np_list)
+#     return imgs_np, masks_list, masks_tensors, scores_list
+
+import torch
+import numpy as np
+
+import torch
+import numpy as np
+
+def segment_tensor(predictor, tensor_img, 
+                   input_points_batch=None, 
+                   input_labels_batch=None, 
+                   input_boxes_batch=None,
+                   mutil_mask=True):
     """
-    # 初始化返回列表
+    兼容旧版SAM的多batch分割函数（适配box/coords旧参数）
+    """
     imgs_np_list = []
     masks_list = []
     masks_tensors_list = []
     scores_list = []
     
-    # 获取batch大小
     batch_size = tensor_img.shape[0]
     _, C, H, W = tensor_img.shape
+    
+    # 初始化默认值
+    if input_points_batch is None:
+        input_points_batch = [None] * batch_size
     if input_labels_batch is None:
         input_labels_batch = [None] * batch_size
+    if input_boxes_batch is None:
+        input_boxes_batch = [None] * batch_size
     
-    # 确保引导点和标签的长度匹配batch size
-    assert len(input_points_batch) == batch_size, \
-        f"input_points_batch长度({len(input_points_batch)})应等于batch size({batch_size})"
-    assert len(input_labels_batch) == batch_size, \
-        f"input_labels_batch长度({len(input_labels_batch)})应等于batch size({batch_size})"
+    # 校验batch长度
+    assert len(input_points_batch) == batch_size
+    assert len(input_labels_batch) == batch_size
+    assert len(input_boxes_batch) == batch_size
     
-    # 遍历每个batch处理
     for i in range(batch_size):
-        # 获取当前batch的图像
-        img_tensor = tensor_img[i]  # CHW格式
-        
-        # 转换为SAM所需格式：HWC, 0-255, uint8
-        img_np_i = img_tensor.permute(1, 2, 0).cpu().numpy()  # CHW -> HWC
-        img_np_i = (img_np_i * 255).astype(np.uint8)  # 0-1 -> 0-255
-        
-        # 设置当前图像到SAM预测器
+        # 1. 处理图像格式
+        img_tensor = tensor_img[i]
+        img_np_i = img_tensor.permute(1, 2, 0).cpu().numpy()
+        img_np_i = (img_np_i * 255).astype(np.uint8)
         predictor.set_image(img_np_i)
         
-        # 处理当前batch的引导点和标签
+        # 2. 提取当前batch的引导点/框
         input_point = input_points_batch[i]
         input_label = input_labels_batch[i]
+        input_box = input_boxes_batch[i]
         
-        if len(input_point)>0 :
-            input_point = np.array(input_point)
-            # 如果标签未提供，默认全部为前景(1)
+        # 3. 格式化输入（适配旧版SAM）
+        coords = None       # 旧版点坐标参数
+        labels = None       # 旧版点标签参数
+        box = None          # 旧版框参数
+        
+        # 处理点
+        if input_point is not None :
+            coords = np.array(input_point)
             if input_label is None:
-                input_label = np.array([1] * len(input_point))
+                labels = np.array([1] * len(coords))
             else:
-                input_label = np.array(input_label)
-
+                labels = np.array(input_label)
         
-            # 预测分割掩码
-            masks, scores, logits = predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                multimask_output=mutil_mask
-            )
-        else:
-            # 没有，则默认为全部为前景
+        # 处理框（旧版要求box为(1,4)格式）
+        if input_box is not None :
+            box = np.array(input_box).reshape(1, 4)
+        
+        # 4. SAM预测（核心：兼容旧版参数）
+        if box is not None or coords is not None:
+            predict_kwargs = {"multimask_output": mutil_mask}
+            if coords is not None:
+                predict_kwargs["coords"] = coords
+                predict_kwargs["labels"] = labels
+            if box is not None:
+                predict_kwargs["box"] = box
             
-            # 无引导点的情况：生成全前景掩码（形状与SAM输出对齐）
-            num_masks = 3 if mutil_mask else 1  # 匹配SAM的multimask_output行为
-            # 创建全1掩码 (num_masks, H, W)
-            masks = np.ones((num_masks, H, W), dtype=np.bool_)  # 掩码用布尔型更高效
-            # 生成默认置信度分数（模拟SAM输出）
-            scores = np.array([1.0] * num_masks)  # 全1表示最高置信度
-            # 生成空logits（保持与predict输出格式一致）
+            # 调用旧版predict（无box_coords/input_boxes）
+            masks, scores, logits = predictor.predict(**predict_kwargs)
+        else:
+            # 无引导点/框：生成全前景掩码
+            num_masks = 3 if mutil_mask else 1
+            masks = np.ones((num_masks, H, W), dtype=np.bool_)
+            scores = np.array([1.0] * num_masks)
             logits = np.zeros((num_masks, H, W), dtype=np.float32)
-
-        # 转换掩码为tensor,detach
         
-        masks_tensor = torch.from_numpy(masks).float()  # (num_masks, H, W)
-        masks_tensor = masks_tensor.detach()
-        # 将结果添加到列表
+        # 5. 收集结果
+        masks_tensor = torch.from_numpy(masks).float().detach()
         imgs_np_list.append(img_np_i)
         masks_list.append(masks)
-        
         masks_tensors_list.append(masks_tensor)
         scores_list.append(scores)
-    masks_tensors=torch.stack(masks_tensors_list)
-    imgs_np=np.stack(imgs_np_list)
+    
+    masks_tensors = torch.stack(masks_tensors_list)
+    imgs_np = np.stack(imgs_np_list)
     return imgs_np, masks_list, masks_tensors, scores_list
 
 def visualize_sam(tensor_img, masks, scores, save_path="sam_segment_result.png"):
