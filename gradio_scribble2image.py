@@ -101,7 +101,7 @@ if __name__=='__main__':
     ddim_steps = 10              # 采样步数
     guess_mode = False            # 是否使用猜测模式
     strength = 1.0                # 控制生成与输入的相似度
-    scale = 9.0                   # 引导系数
+    scale = 11.0                   # 引导系数
     seed = 42                     # 随机种子（用于结果可复现）
     eta = 0.0                     # DDIM采样器的eta参数
 

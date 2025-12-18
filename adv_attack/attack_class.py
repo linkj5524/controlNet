@@ -13,7 +13,7 @@ import os
 from tqdm import tqdm
 import sys
 from pytorch_lightning import seed_everything
-
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 # 本地的包
 ## 添加本地包路径,即上一级的路径
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -45,7 +45,7 @@ class ADV_ATTACK:
                   sam_checkpoint_path:str="sam_vit_h_4b8939.pth",
                   captioner_model_name:str=r"./models/Salesforceblip-image-captioning-large",
                   inpaint_model_path:str=r"./sdxl-inpaint-model",
-                  **kwargs
+                  kwargs:dict=None
                   ):
         """
         初始化对抗攻击类
@@ -81,9 +81,10 @@ class ADV_ATTACK:
             "conf_threshold":0.25,
             "iou_threshold":0.1,
             "attribution_loss_weight" :100,
-            "TV_loss_weight":10,
-            "lr":5e-4,
-            "conext_loss_weight":1000
+            "TV_loss_weight":0,
+            "lr":5e-3,
+            "conext_loss_weight":0,
+            "perceptual_loss_weight":10
         }
             # scale  encode 8,优化为2，目前测试效果比较好
             # 后续改成一样，效果需要试验
@@ -137,14 +138,15 @@ class ADV_ATTACK:
 
 
 
-    def init_object_detection(self):
+    def init_object_detection(self,device=None):
         """初始化目标检测模型"""
-
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # 加载检测模型
         self.object_detection=ObjectDetection(self.detect_model_type,
                                               model_path=self.model_path_object_detection,
                                               class_names=self.class_names,
-                                              device=torch.device("cpu"),
+                                              device=device,
                                               **self.default_params)
 
     def destroy_object_detection(self):
@@ -864,12 +866,12 @@ class ADV_ATTACK:
         sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
         # 处理,注意mask——logic 的维度，是否是多个通道
         
-        
+        #sam_masks_logic_mutil_list 列表里面，为numpy，N*H*W
         sam_img_np, sam_masks_logic_mutil_list, sam_masks_tensor_all, sam_scores_all_list=segment_tensor(predictor=sam_predicter, 
                                                                                                          tensor_img=background_imag,
                                                                                                          input_labels_batch=object_class,
                                                                                                         input_boxes_batch=input_boxes_list
-                                                                                                           ,mutil_mask=True)
+                                                                                                           ,mutil_mask=False)
         
         
         
@@ -882,35 +884,43 @@ class ADV_ATTACK:
 
         # control 处理
 
-        # mask 选择
-        mask_logic_np_select, mask_tensor_select=self.select_mask_by_criteria(
-            masks_logic_mutil_all=sam_masks_logic_mutil_list,
-            masks_tensor_all=sam_masks_tensor_all,
-            scores_all=sam_scores_all_list,
-            exp_path=all_exp_root,
-            mask_select_statues=mask_select_statues
-        )
+        # # mask 选择
+        # mask_logic_np_select, mask_tensor_select=select_mask_by_criteria(
+        #     masks_logic_mutil_all=sam_masks_logic_mutil_list,
+        #     masks_tensor_all=sam_masks_tensor_all,
+        #     scores_all=sam_scores_all_list,
+        #     exp_path=all_exp_root,
+        #     mask_select_statues=mask_select_statues
+        # )
+        mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
+        mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
 
 
-        # 创建mask_logic_temp,里面全是True,numpy
-        # mask_logic_np_for_optim 用于生成control，mask_logic_np_select用于最后生成的图像crop 到背景图像
-        # mask_logic_np_for_control = np.ones_like(mask_logic_np_select, dtype=bool)
-        mask_logic_np_for_control= mask_logic_np_select
-        canny_for_visual,control_image=self.canny_with_mask_invert(background_imag,mask_logic_np_for_control)
+       # 提取物体
+        object_image=self.extract_mask_content(background_imag,mask_logic_np_select)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object.jpg')) 
+
+
+        canny_for_visual,control_image=canny_with_mask_invert(object_image,mask_logic_np_select)
         # 保存图片
         for i,exp_root_dir in enumerate(all_exp_root):
             tensor2picture(canny_for_visual[i],os.path.join(exp_root_dir, 'control.jpg'))
 
-       # 提取物体
-        object_image=self.extract_mask_content(background_imag,mask_logic_np_for_control)
+        control_image,rect_list,_=crop_mask_region_and_resize(control_image,mask_logic_np_select)
+
         for i,exp_root_dir in enumerate(all_exp_root):
-            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object.jpg')) 
+            tensor2picture(control_image[i],os.path.join(exp_root_dir, 'new_control.jpg')) 
+
+
+
+
 
         # # background_image 的文本描述提取,object_image的文本描述提取
         # blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
-        # background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
+        # # background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
         # object_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, object_image)
-        # print(f"\n背景图像描述: {background_imag_caption}")
+        # # print(f"\n背景图像描述: {background_imag_caption}")
         # print(f"物体图像描述: {object_imag_caption}")
         # destroy_image_captioner(blip_model) 
         
@@ -933,7 +943,10 @@ class ADV_ATTACK:
         # 获取batch
         B,C,H, W= background_imag.shape
         shape = (4, H // 8, W // 8)
-        # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,background_imag_caption)]
+        # 缩放control image
+
+
+        # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
         control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   object_class] # 目前较正常
         # control_text=[params["prompt"] ]*B
 
@@ -968,9 +981,17 @@ class ADV_ATTACK:
                                                      unconditional_conditioning=un_cond)
         
         controlnet_adv_sample = self.model.decode_first_stage(samples)
+
+        self.destroy_controlnet() 
+
+        controlnet_adv_sample=(controlnet_adv_sample+1)/2 # 采样原始范围为-1到1，这里转为0-1
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample0.jpg'))
+        # 缩放回去
+        controlnet_adv_sample=resized_images(controlnet_adv_sample,rect_list)
         for i,exp_root_dir in enumerate(all_exp_root):
             tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample.jpg'))
-        self.destroy_controlnet() 
+
         """
             ====================================================
             =========== controlnet采样后的图像优化 ===============
@@ -999,6 +1020,20 @@ class ADV_ATTACK:
         #  优化图像 获取，基于mask
         adv_init_tensor=self.batched_tensor_mask_overlay(background_imag,controlnet_adv_sample,mask_logic_np_select)
         adv_init_tensor=adv_init_tensor.detach().clone()
+
+        # 移动到GPU
+        optim_device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        adv_init_tensor = move_to_gpu(adv_init_tensor,optim_device)
+        result_gt=move_to_gpu(result_gt,optim_device)
+        attributions_gt = move_to_gpu(attributions_gt,optim_device)
+        background_imag=move_to_gpu(background_imag,optim_device)
+
+        adv_init_tensor_gt=adv_init_tensor.clone()
+
+        # 检测，做参考
+        result_epoch,_=self.object_detection.detect(adv_init_tensor_gt,file_path=all_exp_root,file_name='generate_init.jpg',grad_status=False)
+
+
         adv_init_tensor.requires_grad = True
         # 优化初始化
         optimizer = torch.optim.Adam([adv_init_tensor], lr=params["lr"])
@@ -1006,7 +1041,10 @@ class ADV_ATTACK:
         attr_loss_l2 = nn.MSELoss()
         TV_Loss=TVLoss()    
         conext_loss_l2 = nn.MSELoss()
-
+        perceptual_loss = LearnedPerceptualImagePatchSimilarity(
+            net_type="vgg",  # 可选：'alex', 'vgg', 'squeeze'
+            normalize=True   # 自动归一化输入（匹配ImageNet规范）
+        ).to(optim_device)
 
         pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
         for epoch in pbar:
@@ -1036,38 +1074,39 @@ class ADV_ATTACK:
             attr_loss=attr_loss_l2(attributions_epoch,attributions_gt)
             
             loss ,loss_dict= cross_entro_loss(result_epoch, result_gt)
-            tv_loss=TV_Loss(adv_tensor_optim)
-            conext_loss=conext_loss_l2(adv_tensor_optim,background_imag)
-            
+            # tv_loss=TV_Loss(adv_tensor_optim)
+            conext_loss=conext_loss_l2(adv_tensor_optim,adv_init_tensor_gt)
+            pr_loss=perceptual_loss(normalize_to_01(adv_tensor_optim),background_imag)
             print(f"attr_loss:{attr_loss}")
             print(f"total_loss:{loss}")
             print(f"class_loss:{loss_dict['class_loss']}")
             print(f"label_gt:{result_gt['labels']},label_pred:{result_epoch['labels']}")
             print(f"score_gt:{result_gt['scores']},score_pred:{result_epoch['scores']}")
-            print(f"tv_loss:{tv_loss}")
+            # print(f"tv_loss:{tv_loss}")
             print(f"conext_loss:{conext_loss}")
+            print(f"perceptual_loss:{pr_loss}")
             optimizer.zero_grad()
             
 
             
 
-            ( conext_loss*params['conext_loss_weight']+params['TV_loss_weight'] *tv_loss+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
+            (pr_loss* params["perceptual_loss_weight"]+ conext_loss*params['conext_loss_weight']+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
 
                           
                
             optimizer.step()
             # 手动清理变量，帮助回收内存
-            del loss,loss_dict,tv_loss,attr_loss
+            del loss,loss_dict,attr_loss,pr_loss,conext_loss
             torch.cuda.empty_cache()
 
 
-
+        
         # 保存对抗样本
         for i,exp_root_dir in enumerate(all_exp_root):
 
             adv_path=os.path.join(exp_root_dir, 'adv_example.jpg')
-            cv2.imwrite(adv_path,adv_init_tensor[i])
-
+            tensor2picture(adv_init_tensor[i],adv_path)
+        release_torch_object_memory("perceptual_loss",namespace=locals())
 
         
         
@@ -1656,96 +1695,7 @@ class ADV_ATTACK:
     #     mask_tensor=torch.stack(mask_list)    
     #     return mask_tensor_invert,mask_tensor
 
-    def canny_with_mask_invert(self, background_imag, masks, canny_low=5, canny_high=150):
-        """
-        对 tensor 图像计算 Canny 边缘，mask 以外区域置 0，同时添加 mask 自身的边界边缘；
-        最终边缘处为 0、无边缘处为 1
-        
-        参数：
-            background_imag: 输入图像 tensor（BCHW 或 CHW 格式，0-1 范围）
-            masks: 分割掩码 array（shape: (B, num_masks, H, W) 或 (B, H, W)，元素为 True/False）
-            canny_low: Canny 低阈值（默认 5）
-            canny_high: Canny 高阈值（默认 150）
-        
-        返回：
-            mask_tensor_invert: 反转后的边缘 tensor（BCHW，边缘=0，无边缘=1，含 mask 边界）
-            mask_tensor: 原始边缘 tensor（BCHW，边缘=255/1，无边缘=0，含 mask 边界）
-        """
-        # 1. 处理输入图像 tensor → 适配批量维度
-        if background_imag.dim() == 3:
-            background_imag = background_imag.unsqueeze(0)  # CHW → BCHW
-        batch_size = background_imag.shape[0]
-        mask_invert_list = []
-        mask_list = []
 
-        # 2. 批量处理每个样本
-        for i in range(batch_size):
-            # ===== 步骤1：图像预处理（转 HWC + 0-255 整数）=====
-            background_imag_b = background_imag[i].clamp(0, 1)
-            img_np = background_imag_b.permute(1, 2, 0).cpu().numpy()  # CHW → HWC
-            img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
-            H, W = img_np.shape[:2]
-
-            # ===== 步骤2：mask 预处理（适配维度 + 转二值掩码）=====
-            # 处理 mask 维度：若为 (num_masks, H, W) 则取第一个掩码；若为 (H,W) 直接用
-            mask_i = masks[i] if len(masks.shape) == 4 else masks
-            if mask_i.ndim == 3:
-                mask_i = mask_i[0]  # 取第一个掩码（可根据需求调整索引）
-            selected_mask = (mask_i.astype(np.uint8) * 255)  # (H, W)，True→255，False→0
-
-            # ===== 步骤3：提取 mask 自身的边界边缘 =====
-            # 用轮廓检测提取 mask 边界
-            contours, _ = cv2.findContours(
-                selected_mask, 
-                cv2.RETR_EXTERNAL,  # 只提取最外层轮廓
-                cv2.CHAIN_APPROX_SIMPLE  # 压缩轮廓点
-            )
-            # 创建空画布绘制 mask 边界
-            mask_edge = np.zeros_like(selected_mask)
-            cv2.drawContours(
-                mask_edge, 
-                contours, 
-                -1,  # 绘制所有轮廓
-                255,  # 轮廓颜色（白色）
-                2  # 轮廓线宽度（可根据需求调整，如1/3）
-            )  # mask_edge: 边界=255，其余=0
-
-            # ===== 步骤4：图像 Canny 边缘检测 =====
-            gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-            canny_edges = cv2.Canny(gray_img, canny_low, canny_high)  # 图像边缘=255，背景=0
-
-            # ===== 步骤5：融合「图像边缘」和「mask 边界」=====
-            # 按位或：只要有一个边缘（图像/mask）就保留
-            fused_edges = cv2.bitwise_or(canny_edges, mask_edge)  # 融合后边缘=255，背景=0
-
-            # ===== 步骤6：掩码过滤：仅保留 mask 内的融合边缘 =====
-            fused_edges_masked = cv2.bitwise_and(fused_edges, selected_mask)  # mask 外→0，mask 内边缘→255
-
-            # ===== 步骤7：像素值反转（边缘255→0，背景0→255）=====
-            inverted_fused = cv2.bitwise_not(fused_edges_masked)  # 反转后：边缘=0，无边缘=255
-
-            # ===== 步骤8：转换为 3 通道 + 0-1 范围 =====
-            # 处理反转后的结果（最终返回的 invert 版本）
-            result_inverted = cv2.cvtColor(inverted_fused.astype(np.uint8), cv2.COLOR_GRAY2RGB)
-            result_inverted = result_inverted / 255.0  # 0-1 float
-            # 转为 tensor（CHW）
-            result_inverted = torch.from_numpy(result_inverted).permute(2, 0, 1).float()
-
-            # 处理原始边缘结果（未反转版本）
-            result_origin = cv2.cvtColor(fused_edges_masked.astype(np.uint8), cv2.COLOR_GRAY2RGB)
-            result_origin = result_origin / 255.0  # 0-1 float
-            # 转为 tensor（CHW）
-            result_origin = torch.from_numpy(result_origin).permute(2, 0, 1).float()
-
-            # ===== 步骤9：收集结果 =====
-            mask_invert_list.append(result_inverted)
-            mask_list.append(result_origin)
-
-        # 拼接批量维度（BCHW）
-        mask_tensor_invert = torch.stack(mask_invert_list)
-        mask_tensor = torch.stack(mask_list)
-        
-        return mask_tensor_invert, mask_tensor
 
 
                   
@@ -1837,66 +1787,7 @@ class ADV_ATTACK:
         
         return result_tensor
 
-    def select_mask_by_criteria(self,
-        masks_logic_mutil_all,
-        masks_tensor_all,
-        scores_all,
-        exp_path,
-        mask_select_statues: int = 1,
-        mask_save_name: str = 'mask.jpg'
-    ) :
-        """
-        根据指定规则（面积最大/置信度最高）从多个掩码中选择最优掩码，并保存掩码图像
-        """
-        mask_logic_list=[]
-        mask_tensor_list=[]
-        for i, masks_logic_mutil_b_in in enumerate(masks_logic_mutil_all):
 
-            masks_tensor_b_in = masks_tensor_all[i]
-            scores_b_in=scores_all[i]
-            # 仅当掩码数量大于1时才需要选择，否则直接取第一个
-            if masks_logic_mutil_b_in.shape[0] == 1:
-                index = 0
-                print(f"仅存在1个掩码，直接选择 index:{index}, score:{scores_b_in[index] if len(scores_b_in)>0 else 'N/A'}")
-                masks_logic_b_out = masks_logic_mutil_b_in[index]
-                masks_tensor_b_out = masks_tensor_b_in[index]
-            else:
-                if mask_select_statues == 1:
-                    # 规则1：选择面积最大的掩码
-                    mask_areas_b_in = masks_logic_mutil_b_in.sum(axis=(1, 2))  # 计算每个掩码的面积
-                    index = np.argmax(mask_areas_b_in)
-                    print(f"[面积优先] index:{index}, 面积:{mask_areas_b_in[index]}, score:{scores_b_in[index]}")
-                    masks_logic_b_out = masks_logic_mutil_b_in[index]
-                    masks_tensor_b_out = masks_tensor_b_in[index]
-                else:
-                    # 规则2：选择置信度最高的掩码（鲁棒性处理）
-                    if len(scores_b_in) == 0:
-                        raise ValueError("scores 数组为空，无法选择最大置信度的掩码！")
-                    if np.isnan(scores_b_in).all():
-                        raise ValueError("scores 全为 NaN，无法选择最大置信度的掩码！")
-                    
-                    # 找到置信度最大的索引（自动跳过NaN）
-                    index = np.nanargmax(scores_b_in)
-                    print(f"[置信度优先] index:{index}, score:{scores_b_in[index]}")
-                    masks_logic_b_out = masks_logic_mutil_b_in[index]
-                    masks_tensor_b_out = masks_tensor_b_in[index]
-            
-            # 保存选中的掩码图像
-            try:
-                exp_path_b_out = exp_path[i]
-                # 确保保存目录存在
-                os.makedirs(exp_path_b_out, exist_ok=True)
-                mask_path = os.path.join(exp_path_b_out, mask_save_name)
-                tensor2picture(masks_tensor_b_out, mask_path)  # 假设tensor2picture是已定义的函数
-                print(f"选中的掩码已保存至: {mask_path}")
-            except Exception as e:
-                print(f"警告：掩码图像保存失败 - {str(e)}")
-            
-            mask_logic_list.append(masks_logic_b_out)
-            mask_tensor_list.append(masks_tensor_b_out)
-        mask_tensor_tensor=torch.stack(mask_tensor_list)
-        mask_logic_np=np.stack(mask_logic_list)
-        return mask_logic_np, mask_tensor_tensor
 
 
 

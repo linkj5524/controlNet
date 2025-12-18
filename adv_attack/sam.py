@@ -252,7 +252,7 @@ def segment_tensor(predictor, tensor_img,
         
         # 处理框（旧版要求box为(1,4)格式）
         if input_box is not None :
-            box = np.array(input_box).reshape(1, 4)
+            box = np.array(input_box.cpu().detach()).reshape(1, 4)
         
         # 4. SAM预测（核心：兼容旧版参数）
         if box is not None or coords is not None:

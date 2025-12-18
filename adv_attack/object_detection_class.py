@@ -776,7 +776,7 @@ class ObjectDetection:
                     cv2.rectangle(img, (x1, y1), (x2, y2), [0, 255, 0], 2)
                     # 绘制标签
                     text = f"{class_name}: {confidence:.2f}"
-                    cv2.putText(img, text, (x1, y1 + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0], 2)
+                    cv2.putText(img, text, (x1, y1 + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 0], 2)
             except IndexError:
                 print(f"Batch {b}: No detections found")
                 continue

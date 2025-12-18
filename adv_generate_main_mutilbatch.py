@@ -59,7 +59,7 @@ if __name__ == '__main__':
     IMG_SIZE = 512  
     IMG_ROOT = r"data/select_coco"  # 整理后的验证集根目录
     IMG_ROOT=r"D:\FILELin\postgraduate\little_paper\coco\val2017\select_coco"
-
+    IMG_ROOT=r"D:\FILELin\postgraduate\little_paper\coco\val2017\coco_select_v2"
     # --------------------------
     # 2. 验证集预处理（无数据增强！）
     # --------------------------
@@ -85,7 +85,7 @@ if __name__ == '__main__':
     img_loader = DataLoader(
         img_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,  
+        shuffle=False,  
         num_workers=4,
         pin_memory=True
     )
