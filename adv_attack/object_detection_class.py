@@ -476,6 +476,11 @@ class ObjectDetection:
         # --------------------------
         if self.model_type == "yolov11":
             with torch.set_grad_enabled(grad_status):
+                # 判断模型和输入的数据类型
+                model_dtype = next(self.model.parameters()).dtype
+                if img_tensor.dtype !=model_dtype :
+                    img_tensor = img_tensor.to(model_dtype)
+                    
                 infer_results = self.model(img_tensor)  
                 out = infer_results[0]
                 out = out.permute(0, 2, 1).contiguous()  # [B,N,84]
@@ -776,7 +781,7 @@ class ObjectDetection:
                     cv2.rectangle(img, (x1, y1), (x2, y2), [0, 255, 0], 2)
                     # 绘制标签
                     text = f"{class_name}: {confidence:.2f}"
-                    cv2.putText(img, text, (x1, y1 + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 0], 2)
+                    cv2.putText(img, text, (x1, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 0], 2)
             except IndexError:
                 print(f"Batch {b}: No detections found")
                 continue

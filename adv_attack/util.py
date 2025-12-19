@@ -13,7 +13,9 @@ import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from typing import Optional, Any,Tuple, Dict, List
+from typing import Optional, Any,Tuple, Dict, List,Union
+from contextlib import suppress
+import pytorch_lightning as pl
 # 纯PyTorch实现的匈牙利算法（无改动，确保不依赖外部库）
 # def hungarian_matching(cost_matrix):
 #     """
@@ -243,7 +245,15 @@ class YOLOv11DetectionLoss(nn.Module):
         return pred_idx, gt_idx
 
     def _compute_iou(self, boxes1, boxes2):
-        """计算两组框的IoU矩阵 [M, K]（xyxy格式，无改动）"""
+        """计算两组框的IoU矩阵 [M, K]（xyxy格式，修复float16精度问题）"""
+        # 保存原始数据类型和设备
+        orig_dtype = boxes1.dtype
+        orig_device = boxes1.device
+        
+        # 转为float32计算，避免半精度精度丢失
+        boxes1 = boxes1.to(dtype=torch.float32)
+        boxes2 = boxes2.to(dtype=torch.float32)
+
         # 交集面积
         x1 = torch.max(boxes1[:, 0].unsqueeze(1), boxes2[:, 0].unsqueeze(0))
         y1 = torch.max(boxes1[:, 1].unsqueeze(1), boxes2[:, 1].unsqueeze(0))
@@ -257,8 +267,10 @@ class YOLOv11DetectionLoss(nn.Module):
 
         # IoU计算（加1e-6避免分母为0）
         iou = inter / (area1.unsqueeze(1) + area2.unsqueeze(0) - inter + 1e-6)
-        return iou
 
+        # 转回原始数据类型和设备
+        iou = iou.to(dtype=orig_dtype, device=orig_device)
+        return iou
     # def forward(self, pred_result, gt_result):
     #     """
     #     简化版前向传播：适配输入结构（pred_result仅含boxes/scores/labels）
@@ -1012,7 +1024,83 @@ def move_to_gpu(obj, device=None):
     # 其他未匹配类型，直接返回
     return obj
 
+def move_to_gpu_and_cast_dtype(obj, device=None, dtype=None):
+    """
+    将嵌套结构（字典、列表、张量等）中的所有 PyTorch Tensor 移动到指定设备，并转换目标数据类型（仅对浮点型张量生效）。
+    
+    参数:
+        obj: 任意输入对象（字典、列表、张量、标量、嵌套结构等）
+        device: 指定设备（如 torch.device('cuda:0')/int/None），默认自动选择可用 GPU
+        dtype: 目标数据类型（如 torch.float16/torch.float32/None），None 则不转换类型（仅对浮点型张量生效）
+    
+    返回:
+        与输入结构完全一致的对象，所有 Tensor 已移至指定设备；浮点型 Tensor 转换为目标类型，整型 Tensor 保留原类型
+    """
+    # 1. 设备处理：自动选择设备
+    if device is None:
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    elif isinstance(device, int):
+        device = torch.device(f'cuda:{device}')
+    elif not isinstance(device, torch.device):
+        raise TypeError(f"device 必须是 torch.device/int/None，当前类型：{type(device)}")
 
+    # 2. 类型校验：确保 dtype 是合法的 PyTorch 数据类型或 None
+    if dtype is not None and not isinstance(dtype, torch.dtype):
+        raise TypeError(f"dtype 必须是 torch.dtype/None，当前类型：{type(dtype)}")
+
+    def _is_float_tensor(tensor):
+        """判断张量是否为浮点型"""
+        return tensor.dtype in (torch.float16, torch.float32, torch.float64, torch.bfloat16)
+
+    def _process_tensor(tensor):
+        """内部函数：处理单个张量的设备和类型转换（仅浮点型张量转换类型）"""
+        # 先处理类型转换：仅对浮点型张量生效，整型张量跳过
+        if dtype is not None and _is_float_tensor(tensor) and tensor.dtype != dtype:
+            tensor = tensor.to(dtype=dtype, non_blocking=True)
+        
+        # 再处理设备迁移：所有张量都执行设备迁移
+        if tensor.device != device:
+            tensor = tensor.to(device=device, non_blocking=True)
+        
+        return tensor
+
+    # 3. 递归处理嵌套结构
+    def _recursive_process(obj):
+        # 终止条件1：Tensor 处理
+        if isinstance(obj, torch.Tensor):
+            return _process_tensor(obj)
+        
+        # 终止条件2：非可迭代对象（标量、字符串等），直接返回
+        if not isinstance(obj, (Mapping, Iterable)) or isinstance(obj, (str, bytes)):
+            return obj
+        
+        # 处理字典（包括普通 dict、OrderedDict 等 Mapping 类型）
+        if isinstance(obj, Mapping):
+            return type(obj)({k: _recursive_process(v) for k, v in obj.items()})
+        
+        # 处理元组（区分命名元组和普通元组）
+        if isinstance(obj, tuple):
+            if hasattr(obj, '_fields'):  # 命名元组
+                return type(obj)(*(_recursive_process(x) for x in obj))
+            else:
+                return tuple(_recursive_process(x) for x in obj)
+        
+        # 处理列表
+        elif isinstance(obj, list):
+            return [_recursive_process(x) for x in obj]
+        
+        # 处理集合
+        elif isinstance(obj, set):
+            return {_recursive_process(x) for x in obj}
+        
+        # 处理其他可迭代对象（如生成器，转为列表）
+        elif isinstance(obj, Iterable):
+            return [_recursive_process(x) for x in obj]
+        
+        # 其他未匹配类型，直接返回
+        return obj
+
+    return _recursive_process(obj)
 
 def release_torch_object_memory(
     obj_name: str, 
@@ -1259,123 +1347,7 @@ def get_mask_min_rect_size(mask: np.ndarray) :
         rect_size_list.append([rect_h, rect_w])
     
     return rect_size_list
-
-
-def crop_mask_region_and_resize(
-    img_tensor: torch.Tensor, 
-    mask: np.ndarray
-) -> Tuple[torch.Tensor, List[List[int]], np.ndarray]:
-    """
-    对B*C*H*W的tensor图像，根据B*H*W的mask找到每个batch的最小包围矩形，
-    裁剪图像的mask区域并缩放到原H*W尺寸，同时返回每个batch的矩形坐标和放大后的mask（数据类型与输入一致）
-    参数：
-        img_tensor: 输入图像张量，shape=(B, C, H, W)，支持CPU/GPU，float32类型
-        mask: numpy数组，shape=(B, H, W)，支持任意合法类型（bool/uint8/float32等）
-    返回：
-        resized_tensor: 处理后的图像张量，shape=(B, C, H, W)，仅保留mask区域并缩放至原尺寸
-        rect_coord_list: 二维列表，每个元素为[x_min, y_min, x_max, y_max]，对应每个batch mask最小矩形坐标；全空mask返回[0,0,0,0]
-        resized_mask: 放大后的mask numpy数组，shape=(B, H, W)，数据类型与输入mask完全一致
-    """
-    # 1. 输入校验
-    assert img_tensor.ndim == 4, f"图像张量必须是4维(B,C,H,W)，当前维度：{img_tensor.ndim}"
-    assert mask.ndim == 3, f"mask必须是3维(B,H,W)，当前维度：{mask.ndim}"
-    assert img_tensor.shape[0] == mask.shape[0], f"图像和mask的batch数不匹配：{img_tensor.shape[0]} vs {mask.shape[0]}"
-    assert img_tensor.shape[2:] == mask.shape[1:], f"图像和mask的HW维度不匹配：{img_tensor.shape[2:]} vs {mask.shape[1:]}"
-    
-    B, C, H, W = img_tensor.shape
-    device = img_tensor.device
-    dtype = img_tensor.dtype
-    resized_tensor = torch.zeros_like(img_tensor, device=device, dtype=dtype)
-    rect_coord_list = []
-    
-    # 保存输入mask的原始数据类型，用于最终输出
-    mask_original_dtype = mask.dtype
-    # 临时转为bool用于计算包围框（不修改原数据）
-    mask_bool = (mask > 0.5).astype(bool) if mask.dtype != bool else mask.copy()
-    
-    # 初始化放大后的mask数组（与输入同类型、同形状）
-    resized_mask = np.zeros_like(mask, dtype=mask_original_dtype)
-    
-    # 3. 遍历每个batch处理
-    for b in range(B):
-        single_mask_bool = mask_bool[b]  # (H, W) bool型，仅用于找包围框
-        single_mask_original = mask[b]   # (H, W) 原始类型，用于裁剪
-        single_img = img_tensor[b]       # (C, H, W) tensor
-        
-        # 获取mask有效像素坐标（基于bool版）
-        y_coords, x_coords = np.where(single_mask_bool)
-        
-        # 处理全空mask
-        if len(y_coords) == 0 or len(x_coords) == 0:
-            rect_coord_list.append([0, 0, 0, 0])
-            resized_tensor[b] = torch.zeros_like(single_img)
-            resized_mask[b] = np.zeros((H, W), dtype=mask_original_dtype)
-            continue
-        
-        # 计算mask最小包围矩形边界
-        y_min = np.min(y_coords)
-        y_max = np.max(y_coords)
-        x_min = np.min(x_coords)
-        x_max = np.max(x_coords)
-        
-        # 保存矩形坐标 [x_min, y_min, x_max, y_max]
-        rect_coord_list.append([x_min, y_min, x_max, y_max])
-        
-        # 4. 裁剪图像的mask区域（tensor切片，保留梯度）
-        cropped_img = single_img[:, y_min:y_max+1, x_min:x_max+1]  # (C, h_crop, w_crop)
-        
-        # 5. 裁剪原始类型的mask区域（保证数据类型不丢失）
-        cropped_mask_original = single_mask_original[y_min:y_max+1, x_min:x_max+1]  # (h_crop, w_crop) 原始类型
-        
-        # 6. 缩放到原H*W尺寸
-        # 缩放图像
-        cropped_img_4d = cropped_img.unsqueeze(0)  # (1, C, h_crop, w_crop)
-        resized_img = torch.nn.functional.interpolate(
-            cropped_img_4d,
-            size=(H, W),
-            mode='bilinear',
-            align_corners=False
-        )
-        
-        # 缩放mask：核心修复——处理bool型不支持的问题
-        # 步骤1：将裁剪后的mask转为OpenCV支持的类型（uint8）
-        if cropped_mask_original.dtype == bool:
-            # bool转uint8（True→255，False→0）
-            cropped_mask_cv = (cropped_mask_original * 255).astype(np.uint8)
-            interp_mode = cv2.INTER_NEAREST  # bool/整数型用最近邻
-        elif np.issubdtype(cropped_mask_original.dtype, np.integer):
-            # 整数型直接用
-            cropped_mask_cv = cropped_mask_original.astype(np.uint8)
-            interp_mode = cv2.INTER_NEAREST
-        else:
-            # 浮点型
-            cropped_mask_cv = cropped_mask_original.astype(np.float32)
-            interp_mode = cv2.INTER_LINEAR
-        
-        # 步骤2：OpenCV缩放（注意：cv2.resize的size是(w, h)，与numpy的(h, w)相反）
-        resized_mask_cv = cv2.resize(
-            cropped_mask_cv,
-            (W, H),  # 目标尺寸：(宽度, 高度)
-            interpolation=interp_mode
-        )
-        
-        # 步骤3：转回原始数据类型
-        if mask_original_dtype == bool:
-            # uint8(255)转回bool(True)
-            resized_mask_single = (resized_mask_cv > 127).astype(mask_original_dtype)
-        else:
-            # 其他类型直接转回
-            resized_mask_single = resized_mask_cv.astype(mask_original_dtype)
-        
-        # 7. 赋值到结果
-        resized_tensor[b] = resized_img.squeeze(0)
-        resized_mask[b] = resized_mask_single
-    
-    return resized_tensor, rect_coord_list, resized_mask
-
-
-
-def canny_with_mask_invert(background_imag, masks=None, canny_low=0, canny_high=150):
+def canny_with_mask_invert(background_imag, masks=None, canny_low=50, canny_high=240,blur_status=True):
     
     """
     对 tensor 图像计算 Canny 边缘，mask 以外区域置 0，同时添加 mask 自身的边界边缘；
@@ -1429,10 +1401,14 @@ def canny_with_mask_invert(background_imag, masks=None, canny_low=0, canny_high=
             contours, 
             -1,  # 绘制所有轮廓
             255,  # 轮廓颜色（白色）
-            2  # 轮廓线宽度（可根据需求调整，如1/3）
+            1  # 轮廓线宽度（可根据需求调整，如1/3）
         )  # mask_edge: 边界=255，其余=0
 
         # ===== 步骤4：图像 Canny 边缘检测 =====
+        # 对图像进行模糊处理
+        if blur_status:
+            img_np = cv2.GaussianBlur(img_np, (5, 5), 0)
+
         gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
         canny_edges = cv2.Canny(gray_img, canny_low, canny_high)  # 图像边缘=255，背景=0
 
@@ -1473,59 +1449,365 @@ def canny_with_mask_invert(background_imag, masks=None, canny_low=0, canny_high=
 
 
 
-def resized_images(
-    images: torch.Tensor,          # 输入图像张量，shape=(B, C, H, W)
-    rect_size_list: List[List[int]]  # 每个batch的矩形框 [x_min, y_min, x_max, y_max]
-) -> torch.Tensor:
+def crop_mask_region(
+    img_tensor: torch.Tensor, 
+    mask: np.ndarray
+) -> Tuple[torch.Tensor, List[List[int]]]:
     """
-    将images按每个batch的矩形框尺寸缩放，放入原尺寸图像的矩形框内（框外填充0）
-    核心：返回张量与输入图像尺寸完全一致（B*C*H*W），仅矩形框内有缩放后的图像，其余为0
+    对B*H*W的mask找到每个batch的最大连通域，计算包含该连通域的最小矩形框，
+    裁剪B*C*H*W图像张量中对应矩形框内的内容，同时返回矩形框坐标
     参数：
-        images: 待缩放的图像张量，支持CPU/GPU，float32类型，shape=(B, C, H, W)
-        rect_size_list: 二维列表，每个元素为[x_min, y_min, x_max, y_max]，对应每个batch的矩形框位置
+        img_tensor: 输入图像张量，shape=(B, C, H, W)，支持CPU/GPU，float32类型
+        mask: numpy数组，shape=(B, H, W)，支持bool/uint8/float32等类型（非0为有效区域）
     返回：
-        result: 缩放+填充后的图像张量，shape与输入完全一致（B, C, H, W），框内为缩放后图像，框外为0
+        cropped_imgs: 裁剪后的图像张量，每个元素为对应batch的矩形框内图像（shape=(b,C, h, w)），全空mask返回空tensor
+        rect_coord_list: 二维列表，每个元素为[x_min, y_min, x_max, y_max]，对应每个batch最大连通域的最小矩形框；全空mask返回[0,0,0,0]
     """
     # 1. 输入校验
-    assert images.ndim == 4, f"images必须是4维(B,C,H,W)，当前维度：{images.ndim}"
-    assert len(rect_size_list) == images.shape[0], f"rect_size_list长度({len(rect_size_list)})与batch数({images.shape[0]})不匹配"
+    assert img_tensor.ndim == 4, f"图像张量必须是4维(B,C,H,W)，当前维度：{img_tensor.ndim}"
+    assert mask.ndim == 3, f"mask必须是3维(B,H,W)，当前维度：{mask.ndim}"
+    assert img_tensor.shape[0] == mask.shape[0], f"图像和mask的batch数不匹配：{img_tensor.shape[0]} vs {mask.shape[0]}"
+    assert img_tensor.shape[2:] == mask.shape[1:], f"图像和mask的HW维度不匹配：{img_tensor.shape[2:]} vs {mask.shape[1:]}"
     
-    B, C, H_org, W_org = images.shape  # 原图尺寸（核心：固定使用原图的H/W）
-    device = images.device
-    dtype = images.dtype
-    
-    # 初始化全0结果张量（与原图尺寸完全一致）
-    result = torch.zeros_like(images, device=device, dtype=dtype)
+    B, C, H, W = img_tensor.shape
+    device = img_tensor.device
+    cropped_imgs = []  # 存储每个batch裁剪后的图像
+    rect_coord_list = []  # 存储每个batch的矩形框坐标
 
     # 2. 遍历每个batch处理
     for b in range(B):
-        img = images[b]  # (C, H_org, W_org)
-        x_min, y_min, x_max, y_max = rect_size_list[b]
+        single_mask = mask[b]  # (H, W) 当前batch的mask
+        single_img = img_tensor[b]  # (C, H, W) 当前batch的图像
+
+        # ---------------------- 步骤1：预处理mask为二值图 ----------------------
+        # 转为bool型（非0为True，0为False）
+        mask_bool = (single_mask > 0.5).astype(np.uint8) if single_mask.dtype != bool else single_mask.astype(np.uint8)
         
-        # 边界校验&裁剪：确保矩形框在原图范围内（超出则截断）
+        # ---------------------- 步骤2：找最大连通域 ----------------------
+        # 查找连通域（cv2.connectedComponentsWithStats支持uint8二值图）
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_bool, connectivity=8)
+        
+        # 处理无有效连通域的情况（仅背景）
+        if num_labels < 2:
+            rect_coord_list.append([0, 0, 0, 0])
+            cropped_imgs.append(torch.empty((C, 0, 0), device=device))  # 空tensor
+            continue
+        
+        # ---------------------- 步骤3：筛选最大连通域（排除背景标签0） ----------------------
+        # stats格式：[x, y, width, height, area]
+        # 跳过背景（标签0），找面积最大的连通域
+        max_area = 0
+        max_label = 1
+        for label in range(1, num_labels):
+            area = stats[label, cv2.CC_STAT_AREA]
+            if area > max_area:
+                max_area = area
+                max_label = label
+        
+        # ---------------------- 步骤4：计算最大连通域的最小矩形框 ----------------------
+        # 方法1：用stats直接获取外接矩形（更快）
+        x_min = stats[max_label, cv2.CC_STAT_LEFT]
+        y_min = stats[max_label, cv2.CC_STAT_TOP]
+        width = stats[max_label, cv2.CC_STAT_WIDTH]
+        height = stats[max_label, cv2.CC_STAT_HEIGHT]
+        x_max = x_min + width
+        y_max = y_min + height
+
+        # 边界校验（确保在图像范围内）
         x_min = max(0, x_min)
         y_min = max(0, y_min)
-        x_max = min(W_org, x_max)
-        y_max = min(H_org, y_max)
+        x_max = min(W, x_max)
+        y_max = min(H, y_max)
+
+        # 保存矩形框坐标 [x_min, y_min, x_max, y_max]
+        rect_coord_list.append([x_min, y_min, x_max, y_max])
+
+        # ---------------------- 步骤5：裁剪图像中对应矩形框的内容 ----------------------
+        # Tensor切片（保留梯度，支持GPU）
+        cropped_img = single_img[:, y_min:y_max, x_min:x_max]  # (C, h, w)
+        cropped_imgs.append(cropped_img)
         
-        # 跳过无效框（x_min >= x_max 或 y_min >= y_max）
-        if x_min >= x_max or y_min >= y_max:
-            continue  # 保持全0
+    cropped_imgs=torch.stack(cropped_imgs)
+    return cropped_imgs, rect_coord_list
+
+
+
+
+
+
+
+def resize_images_keep_aspect(
+    images: torch.Tensor,          # 输入图像张量，shape=(B, C, H1, W1)
+    target_size: Tuple[int, int]   # 目标尺寸 (h, w) → (target_h, target_w)
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    对B*C*H1*W1格式的图像张量进行等比例缩放，空白区域填充0（从左上角开始填充），返回缩放后图像和每个batch的缩放比例
+    参数：
+        images: 输入图像张量，支持CPU/GPU，浮点型（float32/float64）/整数型（uint8/int）
+        target_size: 目标尺寸，格式为 (target_h, target_w)
+    返回：
+        resized_images: 缩放后的图像张量，shape=(B, C, target_h, target_w)
+        scales: 每个batch的缩放比例，shape=(B,)，为宽/高方向的最小缩放比
+    """
+    # 1. 输入校验
+    assert images.ndim == 4, f"输入图像必须是4维(B,C,H,W)，当前维度：{images.ndim}"
+    assert len(target_size) == 2, f"目标尺寸必须是(h,w)二元组，当前长度：{len(target_size)}"
+    target_h, target_w = target_size
+    assert target_h > 0 and target_w > 0, f"目标尺寸必须为正整数：{target_size}"
+
+    B, C, H1, W1 = images.shape
+    device = images.device
+    dtype = images.dtype
+
+    # 2. 初始化输出张量和缩放比例数组
+    resized_images = torch.zeros((B, C, target_h, target_w), device=device, dtype=dtype)
+    scales = torch.zeros(B, device=device, dtype=torch.float32)
+
+    # 3. 逐batch计算缩放比例并缩放
+    for b in range(B):
+        # 单batch图像：(C, H1, W1)
+        img = images[b]
         
-        # 计算矩形框的目标尺寸（原图范围内的有效尺寸）
+        # 计算宽/高缩放比例
+        scale_w = target_w / W1  # 宽度缩放比（目标宽/原图宽）
+        scale_h = target_h / H1  # 高度缩放比（目标高/原图高）
+        scale = min(scale_w, scale_h)  # 选最小比例，保证等比例且完全放入目标尺寸
+        scales[b] = scale
+
+        # 计算等比例缩放后的新尺寸（取整避免浮点误差）
+        new_h = int(round(H1 * scale))
+        new_w = int(round(W1 * scale))
+
+        # 4. 等比例缩放（保留梯度，适配数值类型选择插值方式）
+        img_4d = img.unsqueeze(0)  # 扩展为(1, C, H1, W1)适配interpolate
+        resized_img = torch.nn.functional.interpolate(
+            img_4d,
+            size=(new_h, new_w),
+            mode='bilinear' if dtype.is_floating_point else 'nearest',  # 浮点用双线性，整数用最近邻
+            align_corners=False
+        ).squeeze(0)  # 恢复为(C, new_h, new_w)
+
+        # 5. 从左上角开始填充（核心修改：顶部/左侧无填充，底部/右侧补0）
+        pad_top = 0  # 顶部无填充
+        pad_left = 0  # 左侧无填充
+        # 仅限制新尺寸不超过目标尺寸（避免越界）
+        new_h_clamped = min(new_h, target_h)
+        new_w_clamped = min(new_w, target_w)
+
+        # 赋值到目标张量（左上角开始填充，超出目标尺寸部分裁剪）
+        resized_images[b, :, pad_top:pad_top+new_h_clamped, pad_left:pad_left+new_w_clamped] = resized_img[:, :new_h_clamped, :new_w_clamped]
+
+    return resized_images, scales
+
+
+def resized_images(
+    images: torch.Tensor,          # 输入图像张量，shape=(B, C, H, W)
+    scale    # 缩放比例（单值/每个batch独立比例）
+) -> torch.Tensor:
+    """
+    按指定比例对B*C*H*W图像张量进行等比例缩放，返回缩放后图像张量
+    参数：
+        images: 输入图像张量，支持CPU/GPU，浮点型（float32/float64）/整数型（uint8/int）
+        scale: 缩放比例 - 单值float：所有batch使用同一比例；Tensor(B,)：每个batch独立比例
+    返回：
+        resized_images: 缩放后的图像张量，shape=(B, C, new_h, new_w)（new_h=H*scale, new_w=W*scale）
+    """
+    # 1. 输入校验
+    assert images.ndim == 4, f"输入图像必须是4维(B,C,H,W)，当前维度：{images.ndim}"
+    if isinstance(scale, torch.Tensor):
+        assert scale.numel() in [1, images.shape[0]], \
+            f"缩放比例张量长度需为1或batch数({images.shape[0]})，当前长度：{scale.numel()}"
+        scale = scale.to(images.device, dtype=torch.float32)
+    else:
+        assert isinstance(scale, (int, float)) and scale > 0, \
+            f"缩放比例必须为正数值，当前值：{scale}"
+        scale = torch.tensor([scale]*images.shape[0], device=images.device, dtype=torch.float32)
+
+    B, C, H, W = images.shape
+    device = images.device
+    dtype = images.dtype
+
+    # 2. 逐batch计算新尺寸并缩放
+    resized_list = []
+    for b in range(B):
+        current_scale = scale[b].item() if scale.numel() > 1 else scale[0].item()
+        
+        # 计算等比例缩放后的新尺寸（取整避免浮点误差）
+        new_h = int(round(H * current_scale))
+        new_w = int(round(W * current_scale))
+        # 确保尺寸≥1（避免缩放比例过小导致尺寸为0）
+        new_h = max(1, new_h)
+        new_w = max(1, new_w)
+
+        # 3. 缩放图像（保留梯度，适配数值类型选择插值方式）
+        img = images[b].unsqueeze(0)  # (1, C, H, W)
+        resized_img = torch.nn.functional.interpolate(
+            img,
+            size=(new_h, new_w),
+            mode='bilinear' if dtype.is_floating_point else 'nearest',  # 浮点用双线性，整数用最近邻
+            align_corners=False
+        )
+        resized_list.append(resized_img.squeeze(0))  # (C, new_h, new_w)
+
+    # 4. 堆叠为批量张量
+    resized_images = torch.stack(resized_list, dim=0)  # (B, C, new_h, new_w)
+    return resized_images
+
+
+
+
+def paste_images_to_background(
+    images: torch.Tensor,               # 待粘贴的前景图像，shape=(B, C, H_img, W_img)
+    rect_coord_list: List[List[int]],   # 每个batch的目标矩形框 [x_min, y_min, x_max, y_max]
+    background: torch.Tensor            # 背景图像，shape=(B, C, H_bg, W_bg) 或 (C, H_bg, W_bg)
+) -> torch.Tensor:
+    """
+    将批量前景图像粘贴到背景图像的指定矩形框位置，返回合成后的背景图像
+    参数：
+        images: 前景图像张量，B*C*H_img*W_img，支持CPU/GPU，浮点型（0-1）/整数型（0-255）
+        rect_coord_list: 每个batch的目标矩形框坐标 [x_min, y_min, x_max, y_max]，长度需等于batch数
+        background: 背景图像张量 - 批量模式(B*C*H_bg*W_bg) / 单背景模式(C*H_bg*W_bg)（自动广播到所有batch）
+    返回：
+        composite_bg: 合成后的背景图像，shape=(B, C, H_bg, W_bg)，前景图像被粘贴到指定矩形框位置
+    """
+    # 1. 输入校验
+    assert images.ndim == 4, f"前景图像必须是4维(B,C,H,W)，当前维度：{images.ndim}"
+    B, C, H_img, W_img = images.shape
+    assert len(rect_coord_list) == B, f"矩形框列表长度({len(rect_coord_list)})需等于batch数({B})"
+    
+    # 处理背景图像维度（单背景→广播到所有batch）
+    if background.ndim == 3:
+        C_bg, H_bg, W_bg = background.shape
+        assert C_bg == C, f"前景/背景通道数不匹配：前景{C}，背景{C_bg}"
+        # 广播为批量背景：(C, H_bg, W_bg) → (B, C, H_bg, W_bg)
+        background = background.unsqueeze(0).repeat(B, 1, 1, 1)
+    elif background.ndim == 4:
+        B_bg, C_bg, H_bg, W_bg = background.shape
+        assert B_bg == B and C_bg == C, f"背景batch数({B_bg})/通道数({C_bg})需匹配前景({B}/{C})"
+    else:
+        raise ValueError(f"背景图像维度需为3维(C,H,W)或4维(B,C,H,W)，当前维度：{background.ndim}")
+    
+    # 设备/类型对齐
+    device = images.device
+    background = background.to(device, dtype=images.dtype)
+    # 复制背景避免修改原张量
+    composite_bg = background.clone()
+
+    # 2. 逐batch粘贴图像到指定矩形框
+    for b in range(B):
+        # 获取当前batch的矩形框坐标
+        x_min, y_min, x_max, y_max = rect_coord_list[b]
+        # 计算目标矩形框尺寸
         target_h = y_max - y_min
         target_w = x_max - x_min
 
-        # 3. 缩放当前batch的图像到矩形框尺寸
-        img_4d = img.unsqueeze(0)  # (1, C, H_org, W_org)
+        # 跳过无效矩形框（尺寸≤0）
+        if target_h <= 0 or target_w <= 0:
+            continue
+
+        # 校验矩形框是否在背景范围内
+        assert 0 <= x_min < x_max <= W_bg, f"Batch{b}矩形框X范围[{x_min},{x_max}]超出背景宽度{W_bg}"
+        assert 0 <= y_min < y_max <= H_bg, f"Batch{b}矩形框Y范围[{y_min},{y_max}]超出背景高度{H_bg}"
+
+        # 3. 缩放前景图像到矩形框尺寸（等比例缩放+居中填充，保证不变形）
+        img = images[b]  # (C, H_img, W_img)
+        # 计算缩放比例（选最小比例，保证前景完全放入矩形框）
+        scale_w = target_w / W_img
+        scale_h = target_h / H_img
+        scale = min(scale_w, scale_h)
+        # 等比例缩放后的尺寸
+        new_h = int(round(H_img * scale))
+        new_w = int(round(W_img * scale))
+        # 缩放前景图像
+        img_4d = img.unsqueeze(0)  # (1, C, H_img, W_img)
         resized_img = torch.nn.functional.interpolate(
             img_4d,
-            size=(target_h, target_w),  # 缩放到矩形框的有效尺寸
-            mode='bilinear',            # 图像用双线性，掩码改'nearest'
+            size=(new_h, new_w),
+            mode='bilinear' if images.dtype.is_floating_point else 'nearest',
             align_corners=False
-        ).squeeze(0)  # (C, target_h, target_w)
+        ).squeeze(0)  # (C, new_h, new_w)
 
-        # 4. 将缩放后的图像放入原图尺寸的矩形框内（框外保持0）
-        result[b, :, y_min:y_max, x_min:x_max] = resized_img
+        # 4. 计算居中偏移（前景在矩形框内居中）
+        offset_y = (target_h - new_h) // 2
+        offset_x = (target_w - new_w) // 2
+        # 计算在背景中的实际粘贴坐标
+        paste_y1 = y_min + offset_y
+        paste_y2 = paste_y1 + new_h
+        paste_x1 = x_min + offset_x
+        paste_x2 = paste_x1 + new_w
 
-    return result
+        # 5. 粘贴前景图像到背景指定位置
+        composite_bg[b, :, paste_y1:paste_y2, paste_x1:paste_x2] = resized_img
+
+    return composite_bg
+
+
+
+def paste_images_to_background_no_scale(
+    images: torch.Tensor,               # 待粘贴的前景图像，shape=(B, C, H_img, W_img)
+    rect_coord_list: List[List[int]],   # 每个batch的目标矩形框 [x_min, y_min, x_max, y_max]
+    background: torch.Tensor            # 背景图像，shape=(B, C, H_bg, W_bg) 或 (C, H_bg, W_bg)
+) -> torch.Tensor:
+    """
+    【不缩放前景】将批量前景图像直接粘贴到背景图像的指定矩形框位置，超出框部分裁剪，不足仅贴有效区域
+    参数：
+        images: 前景图像张量，B*C*H_img*W_img，支持CPU/GPU，浮点型（0-1）/整数型（0-255）
+        rect_coord_list: 每个batch的目标矩形框坐标 [x_min, y_min, x_max, y_max]，长度需等于batch数
+        background: 背景图像张量 - 批量模式(B*C*H_bg*W_bg) / 单背景模式(C*H_bg*W_bg)（自动广播到所有batch）
+    返回：
+        composite_bg: 合成后的背景图像，shape=(B, C, H_bg, W_bg)
+    """
+    # 1. 输入校验
+    assert images.ndim == 4, f"前景图像必须是4维(B,C,H,W)，当前维度：{images.ndim}"
+    B, C, H_img, W_img = images.shape
+    assert len(rect_coord_list) == B, f"矩形框列表长度({len(rect_coord_list)})需等于batch数({B})"
+    
+    # 处理背景图像维度（单背景→广播到所有batch）
+    if background.ndim == 3:
+        C_bg, H_bg, W_bg = background.shape
+        assert C_bg == C, f"前景/背景通道数不匹配：前景{C}，背景{C_bg}"
+        # 广播为批量背景：(C, H_bg, W_bg) → (B, C, H_bg, W_bg)
+        background = background.unsqueeze(0).repeat(B, 1, 1, 1)
+    elif background.ndim == 4:
+        B_bg, C_bg, H_bg, W_bg = background.shape
+        assert B_bg == B and C_bg == C, f"背景batch数({B_bg})/通道数({C_bg})需匹配前景({B}/{C})"
+    else:
+        raise ValueError(f"背景图像维度需为3维(C,H,W)或4维(B,C,H,W)，当前维度：{background.ndim}")
+    
+    # 设备/类型对齐，复制背景避免修改原张量
+    device = images.device
+    composite_bg = background.to(device, dtype=images.dtype).clone()
+
+    # 2. 逐batch粘贴图像（不缩放，直接贴）
+    for b in range(B):
+        # 获取当前batch的矩形框坐标
+        x_min, y_min, x_max, y_max = rect_coord_list[b]
+        # 目标矩形框尺寸
+        target_h = y_max - y_min
+        target_w = x_max - x_min
+
+        # 跳过无效矩形框（尺寸≤0）
+        if target_h <= 0 or target_w <= 0:
+            continue
+
+        # 校验矩形框是否在背景范围内（仅警告，自动裁剪到背景边界）
+        x_min = max(0, x_min)
+        y_min = max(0, y_min)
+        x_max = min(W_bg, x_max)
+        y_max = min(H_bg, y_max)
+
+        # 3. 计算前景图像的粘贴区域（直接映射，超出部分裁剪）
+        # 前景在矩形框内的有效粘贴范围
+        paste_h = min(H_img, y_max - y_min)  # 前景高度 vs 框高度，取较小值
+        paste_w = min(W_img, x_max - x_min)  # 前景宽度 vs 框宽度，取较小值
+
+        # 4. 执行粘贴（仅粘贴有效区域）
+        if paste_h > 0 and paste_w > 0:
+            # 前景区域：取左上角paste_h*paste_w（超出部分裁剪）
+            img_patch = images[b, :, :paste_h, :paste_w]
+            # 背景区域：矩形框内对应位置
+            composite_bg[b, :, y_min:y_min+paste_h, x_min:x_min+paste_w] = img_patch
+
+    return composite_bg
+
+

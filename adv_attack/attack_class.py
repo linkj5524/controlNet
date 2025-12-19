@@ -1,4 +1,7 @@
 
+import time
+
+from omegaconf import OmegaConf
 from share import *
 
 import numpy as np
@@ -21,6 +24,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from annotator.util import resize_image, HWC3
 from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
+from ldm.util import instantiate_from_config as instantiate_from_config_vae
 # from util import *
 
 # 
@@ -33,6 +37,7 @@ from sam import *
 from captioner_blip_model import *
 from sd_inpaint import *
 from IDG_util.attribution_methods.saliencyMethods import * 
+from vae import *
 
 class ADV_ATTACK:
     def __init__(self, config_path:str='./models/cldm_v15.yaml',
@@ -43,8 +48,9 @@ class ADV_ATTACK:
                   model_path_object_detection:str=None,
                   sam_model_type:str="vit_h",
                   sam_checkpoint_path:str="sam_vit_h_4b8939.pth",
-                  captioner_model_name:str=r"./models/Salesforceblip-image-captioning-large",
+                  captioner_model_name:str=r"./models/Salesforceblip_image_captioning_large",
                   inpaint_model_path:str=r"./sdxl-inpaint-model",
+                  vae_model_path:str=r"models\sd_vae_ft_mse",
                   kwargs:dict=None
                   ):
         """
@@ -82,8 +88,8 @@ class ADV_ATTACK:
             "iou_threshold":0.1,
             "attribution_loss_weight" :100,
             "TV_loss_weight":0,
-            "lr":5e-3,
-            "conext_loss_weight":0,
+            "lr":5e-3, # V2 5e-3 ；v3
+            "conext_loss_weight":100,
             "perceptual_loss_weight":10
         }
             # scale  encode 8,优化为2，目前测试效果比较好
@@ -100,7 +106,7 @@ class ADV_ATTACK:
         self.sam_checkpoint_path = sam_checkpoint_path
         self.captioner_model_name=captioner_model_name
         self.inpaint_model_path=inpaint_model_path
-
+        self.vae_model_path=vae_model_path
         
 
 
@@ -149,6 +155,9 @@ class ADV_ATTACK:
                                               device=device,
                                               **self.default_params)
 
+
+
+
     def destroy_object_detection(self):
         """销毁目标检测模型"""
         if hasattr(self, 'object_detection'):
@@ -157,7 +166,7 @@ class ADV_ATTACK:
         torch.cuda.empty_cache()
 
 
-    def generate_adversarial_main(self,background_imag=None, exp_path=r'./exp',images_path=None,mask_select_statues=0,params=None):
+    def generate_adversarial_main(self,background_imag=None, exp_path=r'./exp',images_path=['name'],mask_select_statues=0,params=None):
         """
         生成对抗样本
         
@@ -181,6 +190,22 @@ class ADV_ATTACK:
         np.random.seed(params["seed"])
         self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+
+
+        # 初始化模型
+        self.init_controlnet()
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=True)
+        background_imag=background_imag.unsqueeze(0)
+        background_imag_n1_1=background_imag*2-1
+        latent_input = self.imgTensor_to_latent(background_imag_n1_1)
+
+        # 
+        image_test=self.latent_to_imgTensor01(latent_input)
+        tensor2picture((image_test+1)/2,"image_test.png")
+
+
+
 
 
         # background——image 的文本描述提取
@@ -331,6 +356,9 @@ class ADV_ATTACK:
         object_image_n1_1=object_image*2-1
         latent_input = self.imgTensor_to_latent(object_image_n1_1)
 
+        # 
+        image_test=self.latent_to_imgTensor01(latent_input)
+        tensor2picture((image_test+1)/2,"image_test.png")
         # 参考归因
         attributions_ref = IG_Detection(
             input_img=object_image,
@@ -403,326 +431,6 @@ class ADV_ATTACK:
 
 
             # 转换成图片
-            image=self.latent_to_imgTensor01(end_latent)
-            image_object_on_background=self.batched_tensor_mask_overlay(background_imag,image,mask_logic_np_select)
-           
-            result_temp,_=self.object_detection.detect(image,file_path=all_exp_root,file_name='result_generate.jpg',grad_status=True)
-            # 目标检测模型的输出
-            
-            result,_  =self.object_detection.detect(image_object_on_background,file_path=all_exp_root,file_name='result_temp.jpg',grad_status=True)
-
-            if image is None:
-                print("对抗样本为空")
-                continue
-            attributions = IG_Detection(
-                input_img=image,
-                det_model=self.object_detection, 
-                steps=50,
-                batch_size=10,
-                alpha_star=1.0,
-                baseline=0.0,
-                target_obj_idx=0
-            )
-
-            # # 4. 可视化结果
-            # if attributions is not None:
-            #     visualize_attribution(background_imag, attributions, save_path=r"exp\attribution")
-            # else:
-            #     print("Attribution failed!")
-
-            attr_loss=attr_loss_l2(attributions,attributions_ref)
-            print(f"attr_loss:{attr_loss}")
-            loss ,loss_dict= cross_entro_loss(result, result_gt)
-            print(f"total_loss:{loss}")
-            print(f"class_loss:{loss_dict['class_loss']}")
-            print(f"label_gt:{result_gt['labels']},label_pred:{result['labels']}")
-            print(f"score_gt:{result_gt['scores']},score_pred:{result['scores']}")
-            tv_loss=TV_Loss(image)
-            print(f"tv_loss:{tv_loss}")
-            optimizer.zero_grad()
-            
-
-            
-
-            ( params['TV_loss_weight'] *tv_loss+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
-
-                          
-               
-            optimizer.step()
-            # 手动清理变量，帮助回收内存
-            del loss,loss_dict,tv_loss,attr_loss
-            torch.cuda.empty_cache()
-
-
-        # image_tensor=self.latent_to_imgTensor01(end_latent)
-
-        image_adv=self.tensor_01_to_numpy_255(image_object_on_background)
-        # 保存对抗样本
-        for i in range(len(all_exp_root)):
-
-            adv_path=os.path.join(all_exp_root[i], 'adv_example.jpg')
-            cv2.imwrite(adv_path,image_adv)
-
-
-
-
-        
-        
-        return 
-
-
-    def generate_adversarial_main_all_mask(self,background_imag=None, exp_path=r'./exp',images_path=None,mask_select_statues=0,params=None):
-        """
-        生成对抗样本
-        
-        参数:
-            control_image: 控制图像 (用于ControlNet)
-            params: 覆盖默认参数的字典
-            
-        返回:
-            生成的对抗图像列表
-        """
-        # 图像预处理，
-        background_imag=self.pad_to_square(background_imag)
-        # 使用默认参数或用户指定参数
-        if params is None:
-            params = self.default_params
-        else:
-            params = {**self.default_params, **params}
-        self.default_params = params
-        # 设置随机种子以确保结果可复现
-        torch.manual_seed(params["seed"])
-        np.random.seed(params["seed"])
-        self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-
-
-        # background——image 的文本描述提取
-        blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
-        background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
-
-        print(f"\n背景图像描述: {background_imag_caption}")
-        destroy_image_captioner(blip_model) 
-
-
-
-
-
-
-       # detect model 初始化
-        self.init_object_detection()
-
-
-        all_exp_root=[]
-        for image_name in images_path:
-            image_name = os.path.splitext(os.path.basename(image_name))[0]
-
-            exp_root_dir=os.path.join(exp_path,f"{image_name}")
-            os.makedirs(exp_root_dir,exist_ok=True)
-            all_exp_root.append(exp_root_dir)
-
-        result_gt,object_class =self.object_detection.detect(background_imag,file_path=all_exp_root,file_name='detect_object_ref.jpg',grad_status=True)
-            
-        
-
-
-
-
-
-
-
-
-        input_point_list=self.yolo_boxes_to_corners(result_gt['boxes'])
-        
-        # 基于输入的background_imag，利用sam，得到mask，返回mask。
-        # 模型初始化
-        sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
-        # 处理,注意mask——logic 的维度，是否是多个通道
-        sam_img_np, sam_masks_logic_mutil_list, sam_masks_tensor_all, sam_scores_all_list=segment_tensor(sam_predicter, background_imag, input_points_batch=input_point_list,mutil_mask=True)
-        
-        
-        
-        
-
-        # visualize_sam(background_imag, masks_logic_mutil, scores)
-        destroy_sam(sam_predicter)
-
-
-
-        # control 处理
-
-        # mask 选择
-        mask_logic_np_select, mask_tensor_select=self.select_mask_by_criteria(
-            masks_logic_mutil_all=sam_masks_logic_mutil_list,
-            masks_tensor_all=sam_masks_tensor_all,
-            scores_all=sam_scores_all_list,
-            exp_path=all_exp_root,
-            mask_select_statues=mask_select_statues
-        )
-
-
-        # 创建mask_logic_temp,里面全是True,numpy
-        # mask_logic_np_for_optim 用于生成control，mask_logic_np_select用于最后生成的图像crop 到背景图像
-        mask_logic_np_for_optim = np.ones_like(mask_logic_np_select, dtype=bool)
-           
-        canny_image_for_visual ,control_image=self.canny_with_mask_invert(background_imag,mask_logic_np_for_optim)
-        # 保存图片
-        for i,exp_root_dir in enumerate(all_exp_root):
-            tensor2picture(canny_image_for_visual[i],os.path.join(exp_root_dir, 'control.jpg'))
-
-       
-
-
-
-        # 初始化模型
-        self.init_controlnet()
-        if params["save_memory"]:
-            self.model.low_vram_shift(is_diffusing=False)
-
-
-
-
-        # # 预处理图像
-        # ## 确保图像通道正常,对图像的size有要求，不能随便的大小
-         
-        # input_image=scale_tensor_to_resolution(input_image,self.default_params["image_resolution"],self.default_params["image_resolution"])
-        
-        # # control_image 处理，背景图像，mask，得到control，计算canny边缘。
-        
-        # control_image=scale_tensor_to_resolution(control_image,self.default_params["image_resolution"],self.default_params["image_resolution"])
-        
-        # self.control=binarize_image_tensor(control_image)     
-        # 添加b
-        # 判断control 的维度
-        if control_image.dim()==3:
-            control_image=control_image.unsqueeze(0)
-
-        
-
-
-        
-        # 获取batch
-        B,C,H, W= background_imag.shape
-        shape = (4, H // 8, W // 8)
-        
-        # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
-        cond = {
-            "c_concat": [control_image],
-            "c_crossattn": [
-                self.model.get_learned_conditioning(
-                    background_imag_caption  
-                )
-            ]
-        }
-        un_cond = {
-            "c_concat": None if params["guess_mode"] else [control_image],
-            "c_crossattn": [
-                self.model.get_learned_conditioning(
-                    [params["n_prompt"]] * B
-                )
-            ]
-        }
- 
-
-
-
-
-
-
-
-
-
-
-        if params["save_memory"]:
-            self.model.low_vram_shift(is_diffusing=True)
-
-
-        self.model.control_scales = (
-            [params["strength"] * (0.825 ** float(12 - i)) for i in range(13)]
-            if params["guess_mode"]
-            else [params["strength"]] * 13
-        )  # Magic number. IDK why
-        
-        object_image=self.extract_mask_content(background_imag,mask_logic_np_for_optim)
-
-        # tensor2picture(object_image,"object_image.png") 
-        # 输入是-1~1
-        # 将0,1 转换成-1,1
-        object_image_n1_1=object_image*2-1
-        latent_input = self.imgTensor_to_latent(object_image_n1_1,1)
-
-        # 参考归因
-        attributions_ref = IG_Detection(
-            input_img=object_image,
-            det_model=self.object_detection,
-            steps=50,
-            batch_size=10,
-            alpha_star=1.0,
-            baseline=0.0,
-            target_obj_idx=0
-        )
-
-        # 4. 可视化结果
-        if attributions_ref is not None:
-            # attribution_ref_path=os.path.join(exp_path, 'attribution_ref.png')
-            visualize_attribution(object_image, attributions_ref, save_path=all_exp_root,file_name_pre='attribution_ref')
-        else:
-            print("Attribution failed!")
-
-
-
-
-        # 设置采样参数
-        self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
-
-        
-
-        # 使用封装的ddim进行逆采样
-        ## latent_start 表示逆采样的结果（噪声最大的latent），out 表示所有的中间结果
-        with torch.no_grad():
-            latent_start,out=self.ddim_sampler.encode_return_all(x0=latent_input, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
-            unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
-
-        # 获取目标检测模型的输出，也可以直接传入这些已知的信息,用于后续计算，确保只用某个目标
-        result_gt_temp,class_name=self.object_detection.detect(object_image,file_path=all_exp_root,file_name='object_detect.jpg',grad_status=False)
-
-
-
-        # 保存中间结果
-        # 对初始latent进行优化
-        # 需要 1. 优化目标 2. 优化器 3. 优化参数 4. 后处理函数
-        # 优化目标：目标检测模型的输出与原始的检测框，类别等的差值
-        # 优化器：Adam
-        # 优化参数：latent
-        # 后处理函数，根据检测模型的输出，得到结果，并进行优化
-
-
-
-
-
-
-
-
-
-
-
-        latent_start=latent_start.detach().clone()
-        latent_start.requires_grad = True
-        optimizer = torch.optim.Adam([latent_start], lr=params["lr"])
-        cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
-        attr_loss_l2 = nn.MSELoss()
-        TV_Loss=TVLoss()
-        #开始步骤
-        t_start=self.ddim_sampler.ddim_timesteps[-1]
-        pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
-        for epoch in pbar:
-            # 循环，优化
-            end_latent=self.ddim_sampler.decode(  latent_start, cond, t_start, unconditional_guidance_scale=params["scale_optim"], unconditional_conditioning=un_cond,
-                use_original_steps=False, callback=None)
-
-
-
-            # 转换成图片s
             image=self.latent_to_imgTensor01(end_latent)
             image_object_on_background=self.batched_tensor_mask_overlay(background_imag,image,mask_logic_np_select)
            
@@ -818,7 +526,8 @@ class ADV_ATTACK:
         np.random.seed(params["seed"])
         self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
 
 
 
@@ -895,11 +604,14 @@ class ADV_ATTACK:
         mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
         mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
 
+        for i in range(len(all_exp_root)):
+            tensor2picture(sam_masks_tensor_all[i],os.path.join(all_exp_root[i], 'mask.jpg'))
+
 
        # 提取物体
         object_image=self.extract_mask_content(background_imag,mask_logic_np_select)
         for i,exp_root_dir in enumerate(all_exp_root):
-            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object.jpg')) 
+            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object_origin.jpg')) 
 
 
         canny_for_visual,control_image=canny_with_mask_invert(object_image,mask_logic_np_select)
@@ -907,13 +619,10 @@ class ADV_ATTACK:
         for i,exp_root_dir in enumerate(all_exp_root):
             tensor2picture(canny_for_visual[i],os.path.join(exp_root_dir, 'control.jpg'))
 
-        control_image,rect_list,_=crop_mask_region_and_resize(control_image,mask_logic_np_select)
-
+        control_image,rect_list=crop_mask_region(control_image,mask_logic_np_select)
+        control_image,control_image_scale=resize_images_keep_aspect(control_image,(H,W))
         for i,exp_root_dir in enumerate(all_exp_root):
-            tensor2picture(control_image[i],os.path.join(exp_root_dir, 'new_control.jpg')) 
-
-
-
+            tensor2picture(control_image[i],os.path.join(exp_root_dir, 'control_resized.jpg')) 
 
 
         # # background_image 的文本描述提取,object_image的文本描述提取
@@ -941,13 +650,13 @@ class ADV_ATTACK:
 
         
         # 获取batch
-        B,C,H, W= background_imag.shape
-        shape = (4, H // 8, W // 8)
+
         # 缩放control image
 
 
         # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
         control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   object_class] # 目前较正常
+        control_text=[" . "+s1+params["prompt"]+'.'+params["prompt"]+'.'+params["prompt"] for s1 in   object_class] # 目前较正常
         # control_text=[params["prompt"] ]*B
 
 
@@ -985,10 +694,11 @@ class ADV_ATTACK:
         self.destroy_controlnet() 
 
         controlnet_adv_sample=(controlnet_adv_sample+1)/2 # 采样原始范围为-1到1，这里转为0-1
-        for i,exp_root_dir in enumerate(all_exp_root):
-            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample0.jpg'))
+        # for i,exp_root_dir in enumerate(all_exp_root):
+        #     tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample0.jpg'))
         # 缩放回去
-        controlnet_adv_sample=resized_images(controlnet_adv_sample,rect_list)
+        controlnet_adv_sample=resized_images(controlnet_adv_sample,1./control_image_scale)
+        controlnet_adv_sample=paste_images_to_background_no_scale(controlnet_adv_sample,rect_list,background_imag)
         for i,exp_root_dir in enumerate(all_exp_root):
             tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample.jpg'))
 
@@ -1019,6 +729,8 @@ class ADV_ATTACK:
 
         #  优化图像 获取，基于mask
         adv_init_tensor=self.batched_tensor_mask_overlay(background_imag,controlnet_adv_sample,mask_logic_np_select)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(adv_init_tensor[i],os.path.join(exp_root_dir, 'adv_init.jpg'))
         adv_init_tensor=adv_init_tensor.detach().clone()
 
         # 移动到GPU
@@ -1031,7 +743,7 @@ class ADV_ATTACK:
         adv_init_tensor_gt=adv_init_tensor.clone()
 
         # 检测，做参考
-        result_epoch,_=self.object_detection.detect(adv_init_tensor_gt,file_path=all_exp_root,file_name='generate_init.jpg',grad_status=False)
+        result_epoch,_=self.object_detection.detect(adv_init_tensor_gt,file_path=all_exp_root,file_name='adv_init_detect.jpg',grad_status=False)
 
 
         adv_init_tensor.requires_grad = True
@@ -1113,9 +825,8 @@ class ADV_ATTACK:
         return 
 
 
-
-
-    def generate_adversarial_test(self, input_image=None,control_image=None, params=None):
+#  缩放目标图像，再计算mask
+    def generate_adversarial_main_two_stage_V2(self,background_imag=None, exp_path=r'./exp',images_path=None,mask_select_statues=0,params=None):
         """
         生成对抗样本
         
@@ -1123,9 +834,14 @@ class ADV_ATTACK:
             control_image: 控制图像 (用于ControlNet)
             params: 覆盖默认参数的字典
             
-        返回:
-            生成的对抗图像列表
         """
+        """
+            ====================================================
+            ============ 图像预处理，初始目标的获取 ==============
+            ====================================================
+        """
+        # 图像预处理，
+        background_imag=self.pad_to_square(background_imag)
         # 使用默认参数或用户指定参数
         if params is None:
             params = self.default_params
@@ -1137,170 +853,1299 @@ class ADV_ATTACK:
         np.random.seed(params["seed"])
         self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-       
-       
-       
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
+
+
+
+
+
+
+
+
+       # detect model 初始化
+        self.init_object_detection()
+
+
+        all_exp_root=[]
+        for image_name in images_path:
+            image_name = os.path.splitext(os.path.basename(image_name))[0]
+
+            exp_root_dir=os.path.join(exp_path,f"{image_name}")
+            os.makedirs(exp_root_dir,exist_ok=True)
+            all_exp_root.append(exp_root_dir)
+
+        result_gt,object_class =self.object_detection.detect(background_imag,file_path=all_exp_root,file_name='detect_object_ref.jpg',grad_status=True)
+        # 过滤筛选出最大的物体
+        result_gt,object_class=self.filter_max_box_per_batch(result_gt,object_class)      
         
+
+
+
+
+
+
+
+
+        input_point_list=self.yolo_boxes_to_corners(result_gt['boxes'])
+        input_boxes_list=result_gt['boxes']
+        # 如果没有，直接跳过
+        if len(input_boxes_list[0])==0:
+            return
+        """
+            ====================================================
+            =========== 图像掩码的获取,canny的获取 ===============
+            ====================================================
+        """
+        # 基于输入的background_imag，利用sam，得到mask，返回mask。
+        # 模型初始化
+        sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
+        # 处理,注意mask——logic 的维度，是否是多个通道
+        
+        #sam_masks_logic_mutil_list 列表里面，为numpy，N*H*W
+        sam_img_np, sam_masks_logic_mutil_list, sam_masks_tensor_all, sam_scores_all_list=segment_tensor(predictor=sam_predicter, 
+                                                                                                         tensor_img=background_imag,
+                                                                                                         input_labels_batch=object_class,
+                                                                                                        input_boxes_batch=input_boxes_list
+                                                                                                           ,mutil_mask=False)
+        
+        
+        
+        
+
+        # visualize_sam(background_imag, masks_logic_mutil, scores)
+        destroy_sam(sam_predicter)
+
+
+
+        # control 处理
+
+        # # mask 选择
+        # mask_logic_np_select, mask_tensor_select=select_mask_by_criteria(
+        #     masks_logic_mutil_all=sam_masks_logic_mutil_list,
+        #     masks_tensor_all=sam_masks_tensor_all,
+        #     scores_all=sam_scores_all_list,
+        #     exp_path=all_exp_root,
+        #     mask_select_statues=mask_select_statues
+        # )
+        mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
+        mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
+
+        for i in range(len(all_exp_root)):
+            tensor2picture(sam_masks_tensor_all[i],os.path.join(all_exp_root[i], 'mask.jpg'))
+
+
+       # 提取物体
+        object_image=self.extract_mask_content(background_imag,mask_logic_np_select)
+        object_image,rect_list=crop_mask_region(object_image,mask_logic_np_select)
+        object_image,object_image_scale=resize_images_keep_aspect(object_image,(H,W))
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object_origin.jpg')) 
+
+
+        canny_for_visual,control_image=canny_with_mask_invert(object_image,blur_status=False)
+        # 保存图片
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(canny_for_visual[i],os.path.join(exp_root_dir, 'control.jpg'))
+
+
+
+        # # background_image 的文本描述提取,object_image的文本描述提取
+        # blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
+        # # background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
+        # object_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, object_image)
+        # # print(f"\n背景图像描述: {background_imag_caption}")
+        # print(f"物体图像描述: {object_imag_caption}")
+        # destroy_image_captioner(blip_model) 
+        
+        """
+            ====================================================
+            =========== controlnet 的初始化,采样 ===============
+            ====================================================
+        """
+
+        # 初始化模型
+        self.init_controlnet()
         if params["save_memory"]:
             self.model.low_vram_shift(is_diffusing=False)
 
 
+        if control_image.dim()==3:
+            control_image=control_image.unsqueeze(0)
+
+        
+        # 获取batch
+
+        # 缩放control image
 
 
-        # 预处理图像
-        ## 确保图像通道正常,对图像的size有要求，不能随便的大小
-        # 确保是三个通道的numpy，int8类型  
-        input_image=HWC3(input_image) ## input_image RGB
-        input_image = cv2.resize(input_image, (self.default_params["image_resolution"],self.default_params["image_resolution"])) # input_image RGB
-
-        if control_image is not None:
-            control_image=HWC3(control_image) ## control_image RGB
-            control_image = cv2.resize(control_image, (self.default_params["image_resolution"],self.default_params["image_resolution"])) # control_image RGB
-            self.edge_image,self.control=self.generate_edge_control_from_image(control_image)
-        else:
-            ## 处理控制图像，并返回边缘图和边缘的control
-            self.edge_image,self.control=self.generate_edge_control_from_image(input_image,'./exp/canny_edge.jpg')
-
+        # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
+        control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   object_class] # 目前较正常
+        control_text=[" . "+s1+params["prompt"]+'.'+params["prompt"]+'.'+params["prompt"] for s1 in   object_class] # 目前较正常
+        # control_text=[params["prompt"] ]*B
 
 
         # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {
-            "c_concat": [self.control],
+            "c_concat": [control_image],
             "c_crossattn": [
                 self.model.get_learned_conditioning(
-                    [params["prompt"] + ', ' + params["a_prompt"]] * params["num_samples"]
+                    control_text  
                 )
             ]
         }
         un_cond = {
-            "c_concat": None if params["guess_mode"] else [self.control],
+            "c_concat": None if params["guess_mode"] else [control_image],
             "c_crossattn": [
                 self.model.get_learned_conditioning(
-                    [params["n_prompt"]] * params["num_samples"]
+                    [params["n_prompt"]] * B
                 )
             ]
         }
  
- 
-        H, W, C = input_image.shape
-        shape = (4, H // 8, W // 8)
 
         if params["save_memory"]:
             self.model.low_vram_shift(is_diffusing=True)
 
 
-        self.model.control_scales = (
-            [params["strength"] * (0.825 ** float(12 - i)) for i in range(13)]
-            if params["guess_mode"]
-            else [params["strength"]] * 13
-        )  # Magic number. IDK why
-        
-        #对图像进行编码，转换为latent
-        temp_tensor=self.to_imgTensor_from_numpy_int8(input_image)
-        latent_input=self.imgTensor_to_latent(temp_tensor)
-        ref_image_tensor=temp_tensor.clone()
-        # 设置采样参数
-        self.ddim_sampler.make_schedule(ddim_num_steps=params["ddim_steps"], ddim_eta=params["eta"], verbose=False)
-        # 使用封装的ddim进行逆采样
-        ## latent_start 表示逆采样的结果（噪声最大的latent），out 表示所有的中间结果
-        with torch.no_grad():
-            latent_start,out=self.ddim_sampler.encode_return_all(x0=latent_input, c=cond, t_enc=params["ddim_steps"], use_original_steps=False, return_intermediates=True,
-            unconditional_guidance_scale=params["scale"], unconditional_conditioning=un_cond, callback=None)
 
-        # 获取目标检测模型的输出，也可以直接传入这些已知的信息
-        result_gt =self.object_detection.detect(input_image,file_path='result1.jpg',grad_status=True)
-        
+        samples, intermediates = self.ddim_sampler.sample(params["ddim_steps"], B,
+                                                     shape, cond, verbose=False, eta=params["eta"],
+                                                     unconditional_guidance_scale=params["scale"],
+                                                     unconditional_conditioning=un_cond)
+        start_time=time.time()
+        controlnet_adv_sample = self.model.decode_first_stage(samples)
+        end_time=time.time()
+        print(f"解码耗时：{end_time-start_time:.2f} 秒")
+        self.destroy_controlnet() 
 
+        controlnet_adv_sample=(controlnet_adv_sample+1)/2 # 采样原始范围为-1到1，这里转为0-1
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample_origin.jpg'))
+        # 缩放回去
+        controlnet_adv_sample=resized_images(controlnet_adv_sample,1./object_image_scale)
+        controlnet_adv_sample=paste_images_to_background_no_scale(controlnet_adv_sample,rect_list,background_imag)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample.jpg'))
 
-
-
-
-        cond_ref = {
-            "c_concat": [self.control],
-            "c_crossattn": [
-                self.model.get_learned_conditioning(
-                    ["military camouflage pattern,army green and brown color sheme"] * params["num_samples"]
-                )
-            ]
-        }
+        """
+            ====================================================
+            =========== controlnet采样后的图像优化 ===============
+            ====================================================
+        """
 
 
+        # 参考归因获取
+        attributions_gt = IG_Detection(
+            input_img=background_imag,
+            det_model=self.object_detection,
+            steps=50,
+            batch_size=10,
+            alpha_star=1.0,
+            baseline=0.0,
+            target_obj_idx=0
+        )
+
+        # 4. 可视化结果
+        if attributions_gt is not None:
+            visualize_attribution(background_imag, attributions_gt, save_path=all_exp_root,file_name_pre='attribution_gt')
+        else:
+            print("Attribution failed!")
 
 
+        #  优化图像 获取，基于mask
+        adv_init_tensor=self.batched_tensor_mask_overlay(background_imag,controlnet_adv_sample,mask_logic_np_select)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(adv_init_tensor[i],os.path.join(exp_root_dir, 'adv_init.jpg'))
+        adv_init_tensor=adv_init_tensor.detach().clone()
+
+        # 移动到GPU
+        optim_device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        adv_init_tensor = move_to_gpu(adv_init_tensor,optim_device)
+        result_gt=move_to_gpu(result_gt,optim_device)
+        attributions_gt = move_to_gpu(attributions_gt,optim_device)
+        background_imag=move_to_gpu(background_imag,optim_device)
+
+        adv_init_tensor_gt=adv_init_tensor.clone()
+
+        # 检测，做参考
+        result_epoch,_=self.object_detection.detect(adv_init_tensor_gt,file_path=all_exp_root,file_name='adv_init_detect.jpg',grad_status=False)
 
 
-
-
-
-
-
-
-        # require grad
-        #断开，减少内存消耗
-        latent_start=latent_start.detach().clone()
-        latent_start.requires_grad = True
-        cond_optim=cond 
-
-
-        
-
-        original_crossattn = cond["c_crossattn"][0]  # 假设是
-        # 2. 克隆并开启梯度（关键步骤）
-        learnable_crossattn = original_crossattn.detach().clone()  # 剥离
-        learnable_crossattn.requires_grad_(True)  # 显式
-        # 3. 构建可优化的条件字典
-        cond_optim = {
-            "c_concat": cond["c_concat"],  # 保持草图控制不变
-            "c_crossattn": [learnable_crossattn]  # 使用可求导的文本编码
-        }
-        optimizer = torch.optim.Adam(cond_optim["c_crossattn"], lr=5e-2) 
+        adv_init_tensor.requires_grad = True
+        # 优化初始化
+        optimizer = torch.optim.Adam([adv_init_tensor], lr=params["lr"])
         cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
-        
-        #开始步骤
-        t_start=self.ddim_sampler.ddim_timesteps[-1]
-        for epoch in range(params["optim_epochs"]):
-            # 循环，优化
-            end_latent=self.ddim_sampler.decode(  latent_start, cond_optim, t_start, unconditional_guidance_scale=8, unconditional_conditioning=un_cond,
-                use_original_steps=False, callback=None)
+        attr_loss_l2 = nn.MSELoss()
+        TV_Loss=TVLoss()    
+        conext_loss_l2 = nn.MSELoss()
+        perceptual_loss = LearnedPerceptualImagePatchSimilarity(
+            net_type="vgg",  # 可选：'alex', 'vgg', 'squeeze'
+            normalize=True   # 自动归一化输入（匹配ImageNet规范）
+        ).to(optim_device)
+
+        pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
+        for epoch in pbar:
+
+            # 利用mask，只优化mask部分
+            adv_tensor_optim=self.batched_tensor_mask_overlay(background_imag,adv_init_tensor,mask_logic_np_select)
+           
+            result_epoch,_=self.object_detection.detect(adv_tensor_optim,file_path=all_exp_root,file_name='result_generate.jpg',grad_status=True)
 
 
+            attributions_epoch = IG_Detection(
+                input_img=adv_tensor_optim,
+                det_model=self.object_detection, 
+                steps=50,
+                batch_size=10,
+                alpha_star=1.0,
+                baseline=0.0,
+                target_obj_idx=0
+            )
 
-            # 转换成图片
-            image=self.latent_to_imgTensor01(end_latent)
- 
- 
-            # 目标检测模型的输出
-            result  =self.object_detection.detect(image,file_path='restore.jpg',grad_status=True)
-            print(result)
-            loss ,loss_dict= cross_entro_loss(result, result_gt)
-            print(f"total_loss:{loss}")
-            optimizer.zero_grad()
-            try:
-                (-loss_dict['class_loss']).backward()
-            except:
-                print("loss_dict['class_loss'] is None")
-                break
+            # # 4. 可视化结果
+            # if attributions_epoch is not None:
+            #     visualize_attribution(adv_tensor_optim, attributions_epoch, save_path=all_exp_root,file_name_pre='attribution_gt')
+            # else:
+            #     print("Attribution failed!")
+            # 这里损失的使用需要注意顺序，不能改变顺序
+            attr_loss=attr_loss_l2(attributions_epoch,attributions_gt)
             
+            loss ,loss_dict= cross_entro_loss(result_epoch, result_gt)
+            # tv_loss=TV_Loss(adv_tensor_optim)
+            conext_loss=conext_loss_l2(adv_tensor_optim,adv_init_tensor_gt)
+            pr_loss=perceptual_loss(normalize_to_01(adv_tensor_optim),background_imag)
+            print(f"attr_loss:{attr_loss}")
+            print(f"total_loss:{loss}")
+            print(f"class_loss:{loss_dict['class_loss']}")
+            print(f"label_gt:{result_gt['labels']},label_pred:{result_epoch['labels']}")
+            print(f"score_gt:{result_gt['scores']},score_pred:{result_epoch['scores']}")
+            # print(f"tv_loss:{tv_loss}")
+            print(f"conext_loss:{conext_loss}")
+            print(f"perceptual_loss:{pr_loss}")
+            optimizer.zero_grad()
+            
+
+            
+
+            (pr_loss* params["perceptual_loss_weight"]+ conext_loss*params['conext_loss_weight']+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
+
+                          
+               
             optimizer.step()
             # 手动清理变量，帮助回收内存
+            del loss,loss_dict,attr_loss,pr_loss,conext_loss
+            torch.cuda.empty_cache()
 
 
-        # 得到最终的对抗样本    
-        # end_latent=self.ddim_sampler.decode(  latent_start, cond_ref, t_start, unconditional_guidance_scale=20.0, unconditional_conditioning=un_cond,
-        #         use_original_steps=False, callback=None)
-        image_tensor=self.latent_to_imgTensor01(end_latent)
-
-        image1=self.tensor_01_to_numpy_255(image_tensor)
+        
         # 保存对抗样本
-        cv2.imwrite('result_adv_attack.png',image1)
+        for i,exp_root_dir in enumerate(all_exp_root):
 
-
-
-
+            adv_path=os.path.join(exp_root_dir, 'adv_example.jpg')
+            tensor2picture(adv_init_tensor[i],adv_path)
+        release_torch_object_memory("perceptual_loss",namespace=locals())
 
         
         
         return 
+
+#  缩放目标图像，再计算mask，利用vae 抑制伪纹理，vae加入到优化过程
+    def generate_adversarial_main_two_stage_V3(self,background_imag=None, exp_path=r'./exp',images_path=None,mask_select_statues=0,params=None):
+        """
+        生成对抗样本
+        
+        参数:
+            control_image: 控制图像 (用于ControlNet)
+            params: 覆盖默认参数的字典
+            
+        """
+        """
+            ====================================================
+            ============ 图像预处理，初始目标的获取 ==============
+            ====================================================
+        """
+        # 图像预处理，
+        background_imag=self.pad_to_square(background_imag)
+        # 使用默认参数或用户指定参数
+        if params is None:
+            params = self.default_params
+        else:
+            params = {**self.default_params, **params}
+        self.default_params = params
+        # 设置随机种子以确保结果可复现
+        torch.manual_seed(params["seed"])
+        np.random.seed(params["seed"])
+        self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
+
+
+
+
+
+
+
+
+       # detect model 初始化
+        self.init_object_detection()
+
+
+        all_exp_root=[]
+        for image_name in images_path:
+            image_name = os.path.splitext(os.path.basename(image_name))[0]
+
+            exp_root_dir=os.path.join(exp_path,f"{image_name}")
+            os.makedirs(exp_root_dir,exist_ok=True)
+            all_exp_root.append(exp_root_dir)
+
+        result_gt,object_class =self.object_detection.detect(background_imag,file_path=all_exp_root,file_name='detect_object_ref.jpg',grad_status=True)
+        # 过滤筛选出最大的物体
+        result_gt,object_class=self.filter_max_box_per_batch(result_gt,object_class)      
+        
+
+
+
+
+
+
+
+
+        input_point_list=self.yolo_boxes_to_corners(result_gt['boxes'])
+        input_boxes_list=result_gt['boxes']
+        # 如果没有，直接跳过
+        if len(input_boxes_list[0])==0:
+            return
+        """
+            ====================================================
+            =========== 图像掩码的获取,canny的获取 ===============
+            ====================================================
+        """
+        # 基于输入的background_imag，利用sam，得到mask，返回mask。
+        # 模型初始化
+        sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
+        # 处理,注意mask——logic 的维度，是否是多个通道
+        
+        #sam_masks_logic_mutil_list 列表里面，为numpy，N*H*W
+        sam_img_np, sam_masks_logic_mutil_list, sam_masks_tensor_all, sam_scores_all_list=segment_tensor(predictor=sam_predicter, 
+                                                                                                         tensor_img=background_imag,
+                                                                                                         input_labels_batch=object_class,
+                                                                                                        input_boxes_batch=input_boxes_list
+                                                                                                           ,mutil_mask=False)
+        
+        
+        
+        
+
+        # visualize_sam(background_imag, masks_logic_mutil, scores)
+        destroy_sam(sam_predicter)
+
+
+
+        # control 处理
+
+        # # mask 选择
+        # mask_logic_np_select, mask_tensor_select=select_mask_by_criteria(
+        #     masks_logic_mutil_all=sam_masks_logic_mutil_list,
+        #     masks_tensor_all=sam_masks_tensor_all,
+        #     scores_all=sam_scores_all_list,
+        #     exp_path=all_exp_root,
+        #     mask_select_statues=mask_select_statues
+        # )
+        mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
+        mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
+
+        for i in range(len(all_exp_root)):
+            tensor2picture(sam_masks_tensor_all[i],os.path.join(all_exp_root[i], 'mask.jpg'))
+
+
+       # 提取物体
+        object_image=self.extract_mask_content(background_imag,mask_logic_np_select)
+        object_image,rect_list=crop_mask_region(object_image,mask_logic_np_select)
+        object_image,object_image_scale=resize_images_keep_aspect(object_image,(H,W))
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object_origin.jpg')) 
+
+
+        canny_for_visual,control_image=canny_with_mask_invert(object_image,blur_status=False)
+        # 保存图片
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(canny_for_visual[i],os.path.join(exp_root_dir, 'control.jpg'))
+
+
+
+        # # background_image 的文本描述提取,object_image的文本描述提取
+        # blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
+        # # background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
+        # object_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, object_image)
+        # # print(f"\n背景图像描述: {background_imag_caption}")
+        # print(f"物体图像描述: {object_imag_caption}")
+        # destroy_image_captioner(blip_model) 
+        
+        """
+            ====================================================
+            =========== controlnet 的初始化,采样 ===============
+            ====================================================
+        """
+
+        # 初始化模型
+        self.init_controlnet()
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=False)
+
+
+        if control_image.dim()==3:
+            control_image=control_image.unsqueeze(0)
+
+        
+        # 获取batch
+
+        # 缩放control image
+
+
+        # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
+        control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   object_class] # 目前较正常
+        control_text=[" . "+s1+params["prompt"]+'.'+params["prompt"]+'.'+params["prompt"] for s1 in   object_class] # 目前较正常
+        # control_text=[params["prompt"] ]*B
+
+
+        # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
+        cond = {
+            "c_concat": [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    control_text  
+                )
+            ]
+        }
+        un_cond = {
+            "c_concat": None if params["guess_mode"] else [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    [params["n_prompt"]] * B
+                )
+            ]
+        }
+ 
+
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=True)
+
+
+
+        samples, intermediates = self.ddim_sampler.sample(params["ddim_steps"], B,
+                                                     shape, cond, verbose=False, eta=params["eta"],
+                                                     unconditional_guidance_scale=params["scale"],
+                                                     unconditional_conditioning=un_cond)
+        start_time=time.time()
+        controlnet_adv_sample = self.model.decode_first_stage(samples)
+        end_time=time.time()
+        print(f"解码耗时：{end_time-start_time:.2f} 秒")
+        self.destroy_controlnet() 
+
+        controlnet_adv_sample=(controlnet_adv_sample+1)/2 # 采样原始范围为-1到1，这里转为0-1
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample_origin.jpg'))
+        # 缩放回去
+        controlnet_adv_sample=resized_images(controlnet_adv_sample,1./object_image_scale)
+        controlnet_adv_sample=paste_images_to_background_no_scale(controlnet_adv_sample,rect_list,background_imag)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample.jpg'))
+
+        """
+            ====================================================
+            =========== controlnet采样后的图像优化 ===============
+            ====================================================
+        """
+
+
+        # 参考归因获取
+        attributions_gt = IG_Detection(
+            input_img=background_imag,
+            det_model=self.object_detection,
+            steps=50,
+            batch_size=10,
+            alpha_star=1.0,
+            baseline=0.0,
+            target_obj_idx=0
+        )
+
+        # 4. 可视化结果
+        if attributions_gt is not None:
+            visualize_attribution(background_imag, attributions_gt, save_path=all_exp_root,file_name_pre='attribution_gt')
+        else:
+            print("Attribution failed!")
+
+
+        #  优化图像 获取，基于mask
+        adv_init_tensor=self.batched_tensor_mask_overlay(background_imag,controlnet_adv_sample,mask_logic_np_select)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(adv_init_tensor[i],os.path.join(exp_root_dir, 'adv_init.jpg'))
+        adv_init_tensor=adv_init_tensor.detach().clone()
+
+        # 检测，做参考
+        result_epoch,_=self.object_detection.detect(adv_init_tensor,file_path=all_exp_root,file_name='adv_init_detect.jpg',grad_status=False)
+        # 移动到GPU
+        optim_device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        optim_data_type=torch.float32
+        adv_init_tensor = move_to_gpu_and_cast_dtype(adv_init_tensor,optim_device,optim_data_type)
+        adv_init_tensor_gt=adv_init_tensor.clone()
+        result_gt=move_to_gpu_and_cast_dtype(result_gt,optim_device,optim_data_type)
+
+        attributions_gt = move_to_gpu_and_cast_dtype(attributions_gt,optim_device,optim_data_type)
+        background_imag=move_to_gpu_and_cast_dtype(background_imag,optim_device,optim_data_type)
+        result_epoch=move_to_gpu_and_cast_dtype(result_epoch,optim_device,optim_data_type)
+
+
+
+
+
+        # vae初始化
+        self.vae_optim=VAEInferencer(model_name=self.vae_model_path,
+                                      dtype=optim_data_type)
+
+
+        adv_init_tensor.requires_grad = True
+        # 优化初始化
+        optimizer = torch.optim.Adam([adv_init_tensor], lr=params["lr"])
+        cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
+        # attr_loss_l2 = nn.MSELoss()
+        TV_Loss=TVLoss()    
+        conext_loss_l2 = nn.MSELoss()
+        # perceptual_loss = LearnedPerceptualImagePatchSimilarity(
+        #     net_type="vgg",  # 可选：'alex', 'vgg', 'squeeze'
+        #     normalize=True   # 自动归一化输入（匹配ImageNet规范）
+        # ).to(optim_device)
+
+        pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
+        for epoch in pbar:
+
+            # vae 的默认范围是是-1到1，这里将0到1 转化为-1到1
+            adv_init_tensor1=adv_init_tensor*2-1
+            adv_tensor_generate01=self.vae_optim.infer(adv_init_tensor1,sample_posterior=False)
+            # 转化回来，将默认-1到1 的范围转化为0到1
+            adv_tensor_generate=(adv_tensor_generate01+1)/2
+            # 利用mask，只优化mask部分
+            adv_tensor_optim=self.batched_tensor_mask_overlay(background_imag,
+                                                              adv_tensor_generate,
+                                                              mask_logic_np_select)
+           
+            result_epoch,_=self.object_detection.detect(adv_tensor_optim,
+                                                        file_path=all_exp_root,
+                                                        file_name='result_generate.jpg',
+                                                        grad_status=True)
+
+
+            # attributions_epoch = IG_Detection(
+            #     input_img=adv_tensor_optim,
+            #     det_model=self.object_detection, 
+            #     steps=50,
+            #     batch_size=10,
+            #     alpha_star=1.0,
+            #     baseline=0.0,
+            #     target_obj_idx=0
+            # )
+
+            result_epoch_f=move_to_gpu_and_cast_dtype(result_epoch,optim_device,optim_data_type)
+            # attributions_epoch_f = move_to_gpu_and_cast_dtype(attributions_epoch,optim_device,optim_data_type)
+            # # 4. 可视化结果
+            # if attributions_epoch is not None:
+            #     visualize_attribution(adv_tensor_optim, attributions_epoch, save_path=all_exp_root,file_name_pre='attribution_gt')
+            # else:
+            #     print("Attribution failed!")
+            # 这里损失的使用需要注意顺序，不能改变顺序
+            # attr_loss=attr_loss_l2(attributions_epoch_f,attributions_gt)
+            
+            loss ,loss_dict= cross_entro_loss(result_epoch_f, result_gt)
+            # tv_loss=TV_Loss(adv_tensor_optim)
+            conext_loss=conext_loss_l2(adv_tensor_optim,adv_init_tensor_gt)
+            # pr_loss=perceptual_loss(normalize_to_01(adv_tensor_optim),background_imag)
+            # print(f"attr_loss:{attr_loss}")
+            print(f"total_loss:{loss}")
+            print(f"class_loss:{loss_dict['class_loss']}")
+            print(f"label_gt:{result_gt['labels']},label_pred:{result_epoch['labels']}")
+            print(f"score_gt:{result_gt['scores']},score_pred:{result_epoch['scores']}")
+            # print(f"tv_loss:{tv_loss}")
+            print(f"conext_loss:{conext_loss}")
+            # print(f"perceptual_loss:{pr_loss}")
+            optimizer.zero_grad()
+            
+
+            
+
+            (conext_loss*params['conext_loss_weight']-loss_dict['class_loss']).backward()
+
+                          
+               
+            optimizer.step()
+            # 手动清理变量，帮助回收内存
+            del loss,loss_dict,conext_loss
+            torch.cuda.empty_cache()
+
+
+        
+        # 保存对抗样本
+        for i,exp_root_dir in enumerate(all_exp_root):
+
+            adv_path=os.path.join(exp_root_dir, 'adv_example.jpg')
+            tensor2picture(adv_init_tensor[i],adv_path)
+        release_torch_object_memory("perceptual_loss",namespace=locals())
+
+        
+        
+        return 
+
+#  缩放目标图像，再计算mask
+    def generate_adversarial_main_two_stage_V2_withref_canny(self,background_imag=None,ref_img=None,  exp_path=r'./exp',images_path=None,mask_select_statues=0,params=None):
+        """
+        生成对抗样本
+        
+        参数:
+            control_image: 控制图像 (用于ControlNet)
+            params: 覆盖默认参数的字典
+            
+        """
+        """
+            ====================================================
+            ============ 图像预处理，初始目标的获取 ==============
+            ====================================================
+        """
+        # 图像预处理，
+        background_imag=self.pad_to_square(background_imag)
+        # 使用默认参数或用户指定参数
+        if params is None:
+            params = self.default_params
+        else:
+            params = {**self.default_params, **params}
+        self.default_params = params
+        # 设置随机种子以确保结果可复现
+        torch.manual_seed(params["seed"])
+        np.random.seed(params["seed"])
+        self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
+
+
+
+
+
+
+
+
+       # detect model 初始化
+        self.init_object_detection()
+
+
+        all_exp_root=[]
+        for image_name in images_path:
+            image_name = os.path.splitext(os.path.basename(image_name))[0]
+
+            exp_root_dir=os.path.join(exp_path,f"{image_name}")
+            os.makedirs(exp_root_dir,exist_ok=True)
+            all_exp_root.append(exp_root_dir)
+
+        result_gt,object_class =self.object_detection.detect(background_imag,file_path=all_exp_root,file_name='detect_object_ref.jpg',grad_status=True)
+        # 过滤筛选出最大的物体
+        result_gt,object_class=self.filter_max_box_per_batch(result_gt,object_class)      
+        
+
+
+
+
+
+
+
+
+        input_point_list=self.yolo_boxes_to_corners(result_gt['boxes'])
+        input_boxes_list=result_gt['boxes']
+        # 如果没有，直接跳过
+        if len(input_boxes_list[0])==0:
+            return
+        """
+            ====================================================
+            =========== 图像掩码的获取,canny的获取 ===============
+            ====================================================
+        """
+        # 基于输入的background_imag，利用sam，得到mask，返回mask。
+        # 模型初始化
+        sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
+        # 处理,注意mask——logic 的维度，是否是多个通道
+        
+        #sam_masks_logic_mutil_list 列表里面，为numpy，N*H*W
+        sam_img_np, sam_masks_logic_mutil_list, sam_masks_tensor_all, sam_scores_all_list=segment_tensor(predictor=sam_predicter, 
+                                                                                                         tensor_img=background_imag,
+                                                                                                         input_labels_batch=object_class,
+                                                                                                        input_boxes_batch=input_boxes_list
+                                                                                                           ,mutil_mask=False)
+        
+        
+        
+        
+
+        # visualize_sam(background_imag, masks_logic_mutil, scores)
+        destroy_sam(sam_predicter)
+
+
+
+        # control 处理
+
+        # # mask 选择
+        # mask_logic_np_select, mask_tensor_select=select_mask_by_criteria(
+        #     masks_logic_mutil_all=sam_masks_logic_mutil_list,
+        #     masks_tensor_all=sam_masks_tensor_all,
+        #     scores_all=sam_scores_all_list,
+        #     exp_path=all_exp_root,
+        #     mask_select_statues=mask_select_statues
+        # )
+        mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
+        mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
+
+        for i in range(len(all_exp_root)):
+            tensor2picture(sam_masks_tensor_all[i],os.path.join(all_exp_root[i], 'mask.jpg'))
+
+
+       # 提取物体
+        object_image=self.extract_mask_content(background_imag,mask_logic_np_select)
+        object_image,rect_list=crop_mask_region(object_image,mask_logic_np_select)
+        object_image,object_image_scale=resize_images_keep_aspect(object_image,(H,W))
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object_origin.jpg')) 
+
+
+        canny_for_visual,control_image=canny_with_mask_invert(object_image,blur_status=False)
+        # 保存图片
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(canny_for_visual[i],os.path.join(exp_root_dir, 'control.jpg'))
+
+
+
+        # # background_image 的文本描述提取,object_image的文本描述提取
+        # blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
+        # # background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
+        # object_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, object_image)
+        # # print(f"\n背景图像描述: {background_imag_caption}")
+        # print(f"物体图像描述: {object_imag_caption}")
+        # destroy_image_captioner(blip_model) 
+        
+        """
+            ====================================================
+            =========== controlnet 的初始化,采样 ===============
+            ====================================================
+        """
+
+        # 初始化模型
+        self.init_controlnet()
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=False)
+
+
+        if control_image.dim()==3:
+            control_image=control_image.unsqueeze(0)
+
+        
+        # 获取batch
+
+        # 缩放control image
+
+
+        # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
+        control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   object_class] # 目前较正常
+        control_text=[" . "+s1+params["prompt"]+'.'+params["prompt"]+'.'+params["prompt"] for s1 in   object_class] # 目前较正常
+        # control_text=[params["prompt"] ]*B
+
+
+        # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
+        cond = {
+            "c_concat": [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    control_text  
+                )
+            ]
+        }
+        un_cond = {
+            "c_concat": None if params["guess_mode"] else [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    [params["n_prompt"]] * B
+                )
+            ]
+        }
+ 
+
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=True)
+
+
+
+        samples, intermediates = self.ddim_sampler.sample(params["ddim_steps"], B,
+                                                     shape, cond, verbose=False, eta=params["eta"],
+                                                     unconditional_guidance_scale=params["scale"],
+                                                     unconditional_conditioning=un_cond)
+        
+        controlnet_adv_sample = self.model.decode_first_stage(samples)
+
+        self.destroy_controlnet() 
+
+        controlnet_adv_sample=(controlnet_adv_sample+1)/2 # 采样原始范围为-1到1，这里转为0-1
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample_origin.jpg'))
+        # 缩放回去
+        controlnet_adv_sample=resized_images(controlnet_adv_sample,1./object_image_scale)
+        controlnet_adv_sample=paste_images_to_background_no_scale(controlnet_adv_sample,rect_list,background_imag)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample.jpg'))
+
+        """
+            ====================================================
+            =========== controlnet采样后的图像优化 ===============
+            ====================================================
+        """
+
+
+        # 参考归因获取
+        attributions_gt = IG_Detection(
+            input_img=background_imag,
+            det_model=self.object_detection,
+            steps=50,
+            batch_size=10,
+            alpha_star=1.0,
+            baseline=0.0,
+            target_obj_idx=0
+        )
+
+        # 4. 可视化结果
+        if attributions_gt is not None:
+            visualize_attribution(background_imag, attributions_gt, save_path=all_exp_root,file_name_pre='attribution_gt')
+        else:
+            print("Attribution failed!")
+
+
+        #  优化图像 获取，基于mask
+        adv_init_tensor=self.batched_tensor_mask_overlay(background_imag,controlnet_adv_sample,mask_logic_np_select)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(adv_init_tensor[i],os.path.join(exp_root_dir, 'adv_init.jpg'))
+        adv_init_tensor=adv_init_tensor.detach().clone()
+
+        # 移动到GPU
+        optim_device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        adv_init_tensor = move_to_gpu(adv_init_tensor,optim_device)
+        result_gt=move_to_gpu(result_gt,optim_device)
+        attributions_gt = move_to_gpu(attributions_gt,optim_device)
+        background_imag=move_to_gpu(background_imag,optim_device)
+
+        adv_init_tensor_gt=adv_init_tensor.clone()
+
+        # 检测，做参考
+        result_epoch,_=self.object_detection.detect(adv_init_tensor_gt,file_path=all_exp_root,file_name='adv_init_detect.jpg',grad_status=False)
+
+
+        adv_init_tensor.requires_grad = True
+        # 优化初始化
+        optimizer = torch.optim.Adam([adv_init_tensor], lr=params["lr"])
+        cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
+        attr_loss_l2 = nn.MSELoss()
+        TV_Loss=TVLoss()    
+        conext_loss_l2 = nn.MSELoss()
+        perceptual_loss = LearnedPerceptualImagePatchSimilarity(
+            net_type="vgg",  # 可选：'alex', 'vgg', 'squeeze'
+            normalize=True   # 自动归一化输入（匹配ImageNet规范）
+        ).to(optim_device)
+
+        pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
+        for epoch in pbar:
+
+            # 利用mask，只优化mask部分
+            adv_tensor_optim=self.batched_tensor_mask_overlay(background_imag,adv_init_tensor,mask_logic_np_select)
+           
+            result_epoch,_=self.object_detection.detect(adv_tensor_optim,file_path=all_exp_root,file_name='result_generate.jpg',grad_status=True)
+
+
+            attributions_epoch = IG_Detection(
+                input_img=adv_tensor_optim,
+                det_model=self.object_detection, 
+                steps=50,
+                batch_size=10,
+                alpha_star=1.0,
+                baseline=0.0,
+                target_obj_idx=0
+            )
+
+            # # 4. 可视化结果
+            # if attributions_epoch is not None:
+            #     visualize_attribution(adv_tensor_optim, attributions_epoch, save_path=all_exp_root,file_name_pre='attribution_gt')
+            # else:
+            #     print("Attribution failed!")
+            # 这里损失的使用需要注意顺序，不能改变顺序
+            attr_loss=attr_loss_l2(attributions_epoch,attributions_gt)
+            
+            loss ,loss_dict= cross_entro_loss(result_epoch, result_gt)
+            # tv_loss=TV_Loss(adv_tensor_optim)
+            conext_loss=conext_loss_l2(adv_tensor_optim,adv_init_tensor_gt)
+            pr_loss=perceptual_loss(normalize_to_01(adv_tensor_optim),background_imag)
+            print(f"attr_loss:{attr_loss}")
+            print(f"total_loss:{loss}")
+            print(f"class_loss:{loss_dict['class_loss']}")
+            print(f"label_gt:{result_gt['labels']},label_pred:{result_epoch['labels']}")
+            print(f"score_gt:{result_gt['scores']},score_pred:{result_epoch['scores']}")
+            # print(f"tv_loss:{tv_loss}")
+            print(f"conext_loss:{conext_loss}")
+            print(f"perceptual_loss:{pr_loss}")
+            optimizer.zero_grad()
+            
+
+            
+
+            (pr_loss* params["perceptual_loss_weight"]+ conext_loss*params['conext_loss_weight']+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
+
+                          
+               
+            optimizer.step()
+            # 手动清理变量，帮助回收内存
+            del loss,loss_dict,attr_loss,pr_loss,conext_loss
+            torch.cuda.empty_cache()
+
+
+        
+        # 保存对抗样本
+        for i,exp_root_dir in enumerate(all_exp_root):
+
+            adv_path=os.path.join(exp_root_dir, 'adv_example.jpg')
+            tensor2picture(adv_init_tensor[i],adv_path)
+        release_torch_object_memory("perceptual_loss",namespace=locals())
+
+        
+        
+        return 
+
+# canny里面 加入参考引导
+    def generate_adversarial_main_two_stage_withref_canny(self,background_imag=None,ref_img=None, exp_path=r'./exp',images_path=None,mask_select_statues=0,params=None):
+        """
+        生成对抗样本
+        
+        参数:
+            control_image: 控制图像 (用于ControlNet)
+            params: 覆盖默认参数的字典
+            
+        """
+        """
+            ====================================================
+            ============ 图像预处理，初始目标的获取 ==============
+            ====================================================
+        """
+        # 图像预处理，
+        background_imag=self.pad_to_square(background_imag)
+        # 使用默认参数或用户指定参数
+        if params is None:
+            params = self.default_params
+        else:
+            params = {**self.default_params, **params}
+        self.default_params = params
+        # 设置随机种子以确保结果可复现
+        torch.manual_seed(params["seed"])
+        np.random.seed(params["seed"])
+        self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
+
+
+
+
+
+
+
+
+       # detect model 初始化
+        self.init_object_detection()
+
+
+        all_exp_root=[]
+        for image_name in images_path:
+            image_name = os.path.splitext(os.path.basename(image_name))[0]
+
+            exp_root_dir=os.path.join(exp_path,f"{image_name}")
+            os.makedirs(exp_root_dir,exist_ok=True)
+            all_exp_root.append(exp_root_dir)
+
+        result_gt,object_class =self.object_detection.detect(background_imag,file_path=all_exp_root,file_name='detect_object_ref.jpg',grad_status=True)
+        # 过滤筛选出最大的物体
+        result_gt,object_class=self.filter_max_box_per_batch(result_gt,object_class)      
+        
+
+
+
+
+
+
+
+
+        input_point_list=self.yolo_boxes_to_corners(result_gt['boxes'])
+        input_boxes_list=result_gt['boxes']
+        # 如果没有，直接跳过
+        if len(input_boxes_list[0])==0:
+            return
+        """
+            ====================================================
+            =========== 图像掩码的获取,canny的获取 ===============
+            ====================================================
+        """
+        # 基于输入的background_imag，利用sam，得到mask，返回mask。
+        # 模型初始化
+        sam_predicter=init_sam(model_type=self.sam_model_type, checkpoint_path=self.sam_checkpoint_path)
+        # 处理,注意mask——logic 的维度，是否是多个通道
+        
+        #sam_masks_logic_mutil_list 列表里面，为numpy，N*H*W
+        sam_img_np, sam_masks_logic_mutil_list, sam_masks_tensor_all, sam_scores_all_list=segment_tensor(predictor=sam_predicter, 
+                                                                                                         tensor_img=background_imag,
+                                                                                                         input_labels_batch=object_class,
+                                                                                                        input_boxes_batch=input_boxes_list
+                                                                                                           ,mutil_mask=False)
+        
+        
+        
+        
+
+        # visualize_sam(background_imag, masks_logic_mutil, scores)
+        destroy_sam(sam_predicter)
+
+
+
+        # control 处理
+
+        # # mask 选择
+        # mask_logic_np_select, mask_tensor_select=select_mask_by_criteria(
+        #     masks_logic_mutil_all=sam_masks_logic_mutil_list,
+        #     masks_tensor_all=sam_masks_tensor_all,
+        #     scores_all=sam_scores_all_list,
+        #     exp_path=all_exp_root,
+        #     mask_select_statues=mask_select_statues
+        # )
+        mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
+        mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
+
+        for i in range(len(all_exp_root)):
+            tensor2picture(sam_masks_tensor_all[i],os.path.join(all_exp_root[i], 'mask.jpg'))
+       # 提取物体
+        object_image=self.extract_mask_content(background_imag,mask_logic_np_select)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(object_image[i],os.path.join(exp_root_dir, 'object_origin.jpg')) 
+
+
+        canny_for_visual,control_image=canny_with_mask_invert(object_image,mask_logic_np_select)
+        # 保存图片
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(canny_for_visual[i],os.path.join(exp_root_dir, 'control.jpg'))
+
+        control_image,rect_list=crop_mask_region(control_image,mask_logic_np_select)
+        control_image,control_image_scale=resize_images_keep_aspect(control_image,(H,W))
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(control_image[i],os.path.join(exp_root_dir, 'control_resized.jpg')) 
+
+
+
+
+
+        # # background_image 的文本描述提取,object_image的文本描述提取
+        # blip_model, blip_processor, blip_device=init_image_captioner(self.captioner_model_name)
+        # # background_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, background_imag)
+        # object_imag_caption = image_captioner_process(blip_model, blip_processor, blip_device, object_image)
+        # # print(f"\n背景图像描述: {background_imag_caption}")
+        # print(f"物体图像描述: {object_imag_caption}")
+        # destroy_image_captioner(blip_model) 
+        
+        """
+            ====================================================
+            =========== controlnet 的初始化,采样 ===============
+            ====================================================
+        """
+
+        # 初始化模型
+        self.init_controlnet()
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=False)
+
+
+        if control_image.dim()==3:
+            control_image=control_image.unsqueeze(0)
+
+        
+        # 获取batch
+
+        # 缩放control image
+
+
+        # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
+        control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   object_class] # 目前较正常
+        # control_text=[params["prompt"] ]*B
+
+
+        # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
+        cond = {
+            "c_concat": [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    control_text  
+                )
+            ]
+        }
+        un_cond = {
+            "c_concat": None if params["guess_mode"] else [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    [params["n_prompt"]] * B
+                )
+            ]
+        }
+ 
+
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=True)
+
+
+
+        samples, intermediates = self.ddim_sampler.sample(params["ddim_steps"], B,
+                                                     shape, cond, verbose=False, eta=params["eta"],
+                                                     unconditional_guidance_scale=params["scale"],
+                                                     unconditional_conditioning=un_cond)
+        
+        controlnet_adv_sample = self.model.decode_first_stage(samples)
+
+        self.destroy_controlnet() 
+
+        controlnet_adv_sample=(controlnet_adv_sample+1)/2 # 采样原始范围为-1到1，这里转为0-1
+        # for i,exp_root_dir in enumerate(all_exp_root):
+        #     tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample0.jpg'))
+        # 缩放回去
+        controlnet_adv_sample=resized_images(controlnet_adv_sample,1./control_image_scale)
+        controlnet_adv_sample=paste_images_to_background_no_scale(controlnet_adv_sample,rect_list,background_imag)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(controlnet_adv_sample[i],os.path.join(exp_root_dir, 'ref_sample.jpg'))
+
+        """
+            ====================================================
+            =========== controlnet采样后的图像优化 ===============
+            ====================================================
+        """
+
+
+        # 参考归因获取
+        attributions_gt = IG_Detection(
+            input_img=background_imag,
+            det_model=self.object_detection,
+            steps=50,
+            batch_size=10,
+            alpha_star=1.0,
+            baseline=0.0,
+            target_obj_idx=0
+        )
+
+        # 4. 可视化结果
+        if attributions_gt is not None:
+            visualize_attribution(background_imag, attributions_gt, save_path=all_exp_root,file_name_pre='attribution_gt')
+        else:
+            print("Attribution failed!")
+
+
+        #  优化图像 获取，基于mask
+        adv_init_tensor=self.batched_tensor_mask_overlay(background_imag,controlnet_adv_sample,mask_logic_np_select)
+        for i,exp_root_dir in enumerate(all_exp_root):
+            tensor2picture(adv_init_tensor[i],os.path.join(exp_root_dir, 'adv_init.jpg'))
+        adv_init_tensor=adv_init_tensor.detach().clone()
+
+        # 移动到GPU
+        optim_device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        adv_init_tensor = move_to_gpu(adv_init_tensor,optim_device)
+        result_gt=move_to_gpu(result_gt,optim_device)
+        attributions_gt = move_to_gpu(attributions_gt,optim_device)
+        background_imag=move_to_gpu(background_imag,optim_device)
+
+        adv_init_tensor_gt=adv_init_tensor.clone()
+
+        # 检测，做参考
+        result_epoch,_=self.object_detection.detect(adv_init_tensor_gt,file_path=all_exp_root,file_name='adv_init_detect.jpg',grad_status=False)
+
+
+        adv_init_tensor.requires_grad = True
+        # 优化初始化
+        optimizer = torch.optim.Adam([adv_init_tensor], lr=params["lr"])
+        cross_entro_loss = YOLOv11DetectionLoss(** self.default_params)
+        attr_loss_l2 = nn.MSELoss()
+        TV_Loss=TVLoss()    
+        conext_loss_l2 = nn.MSELoss()
+        perceptual_loss = LearnedPerceptualImagePatchSimilarity(
+            net_type="vgg",  # 可选：'alex', 'vgg', 'squeeze'
+            normalize=True   # 自动归一化输入（匹配ImageNet规范）
+        ).to(optim_device)
+
+        pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
+        for epoch in pbar:
+
+            # 利用mask，只优化mask部分
+            adv_tensor_optim=self.batched_tensor_mask_overlay(background_imag,adv_init_tensor,mask_logic_np_select)
+           
+            result_epoch,_=self.object_detection.detect(adv_tensor_optim,file_path=all_exp_root,file_name='result_generate.jpg',grad_status=True)
+
+
+            attributions_epoch = IG_Detection(
+                input_img=adv_tensor_optim,
+                det_model=self.object_detection, 
+                steps=50,
+                batch_size=10,
+                alpha_star=1.0,
+                baseline=0.0,
+                target_obj_idx=0
+            )
+
+            # # 4. 可视化结果
+            # if attributions_epoch is not None:
+            #     visualize_attribution(adv_tensor_optim, attributions_epoch, save_path=all_exp_root,file_name_pre='attribution_gt')
+            # else:
+            #     print("Attribution failed!")
+            # 这里损失的使用需要注意顺序，不能改变顺序
+            attr_loss=attr_loss_l2(attributions_epoch,attributions_gt)
+            
+            loss ,loss_dict= cross_entro_loss(result_epoch, result_gt)
+            # tv_loss=TV_Loss(adv_tensor_optim)
+            conext_loss=conext_loss_l2(adv_tensor_optim,adv_init_tensor_gt)
+            pr_loss=perceptual_loss(normalize_to_01(adv_tensor_optim),background_imag)
+            print(f"attr_loss:{attr_loss}")
+            print(f"total_loss:{loss}")
+            print(f"class_loss:{loss_dict['class_loss']}")
+            print(f"label_gt:{result_gt['labels']},label_pred:{result_epoch['labels']}")
+            print(f"score_gt:{result_gt['scores']},score_pred:{result_epoch['scores']}")
+            # print(f"tv_loss:{tv_loss}")
+            print(f"conext_loss:{conext_loss}")
+            print(f"perceptual_loss:{pr_loss}")
+            optimizer.zero_grad()
+            
+
+            
+
+            (pr_loss* params["perceptual_loss_weight"]+ conext_loss*params['conext_loss_weight']+params["attribution_loss_weight"]*attr_loss-loss_dict['class_loss']).backward()
+
+                          
+               
+            optimizer.step()
+            # 手动清理变量，帮助回收内存
+            del loss,loss_dict,attr_loss,pr_loss,conext_loss
+            torch.cuda.empty_cache()
+
+
+        
+        # 保存对抗样本
+        for i,exp_root_dir in enumerate(all_exp_root):
+
+            adv_path=os.path.join(exp_root_dir, 'adv_example.jpg')
+            tensor2picture(adv_init_tensor[i],adv_path)
+        release_torch_object_memory("perceptual_loss",namespace=locals())
+
+        
+        
+        return 
+
 
     def to_imgTensor_from_numpy_int8(self, image):
         """
@@ -1470,30 +2315,6 @@ class ADV_ATTACK:
         return padded_tensor
 
 
-    # def yolo_boxes_to_corners(self,boxes):
-    #     """
-    #     将 YOLO 检测框转换为 [[x1,y1], [x2,y2]] 格式的列表
-        
-    #     参数：
-    #         boxes: YOLO 输出的检测框，形状为 (N, 4)，每个框为 [x_center, y_center, width, height]（归一化坐标）
-        
-    #     返回：
-    #         corners_list: 列表，每个元素为 [[x1, y1], [x2, y2]]（绝对坐标）
-    #     """
-    #     corners_list = []
-    #     # 遍历每个检测框
-    #     for box in boxes:
-    #         x1,y1,x2,y2 = box[0]  # 提取 YOLO 格式的框
-            
-    #         x_center,y_center=(x1+x2)/2,(y1+y2)/2
-            
-    #         # 转为整数（可选，根据需求保留小数或取整）
-    #         x_center,y_center= map(int, [x_center,y_center])
-            
-    #         # 添加到结果列表
-    #         corners_list.append([ x_center,y_center])
-        
-    #     return corners_list
     def yolo_boxes_to_corners(self, boxes):
         """
         将多batch YOLO检测框转换为中心点坐标列表
@@ -1622,78 +2443,6 @@ class ADV_ATTACK:
         
         return filtered_gt,filtered_class_names
 
-    # def canny_with_mask_invert(self,background_imag, masks, canny_low=5, canny_high=150):
-    #     """
-    #     对 tensor 图像计算 Canny 边缘，mask 以外区域置 0，最终边缘处为 0、无边缘处为 1
-        
-    #     参数：
-    #         background_imag: 输入图像 tensor（BCHW 或 CHW 格式，0-1 范围）
-    #         masks: 分割掩码 array（shape: (num_masks, H, W)，元素为 True/False）
-    #         mask_idx: 选择使用哪个掩码（默认第 1 个，索引 0）
-    #         canny_low: Canny 低阈值（默认 100）
-    #         canny_high: Canny 高阈值（默认 200）
-        
-    #     返回：
-    #         final_result: 最终结果（numpy 数组，HWC 格式，边缘=0，无边缘=1）
-    #         final_tensor: 结果转为 tensor（BCHW 格式，0-1 范围，与输入维度匹配）
-    #     """
-    #     # 1. 处理输入图像 tensor → HWC 格式 numpy 数组（0-255 整数）
-    #     if background_imag.dim() == 3:
-    #         background_imag = background_imag.unsqueeze(0) 
-    #     mask_invert_list=[]
-    #     mask_list=[]
-    #     for i in range(background_imag.shape[0]):  # 批量处理
-    #         background_imag_b = background_imag[i].clamp(0, 1)
-    #         img_np = background_imag_b.permute(1, 2, 0).cpu().numpy()  # CHW → HWC
-    #         img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
-            
-    #         # 2. 处理掩码（True→255，False→0）
-    #         selected_mask =(masks[i].astype(np.uint8) * 255)# (H, W) 二值掩码
-            
-            
-    #         # 3. Canny 边缘检测（单通道）
-    #         gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    #         canny_edges = cv2.Canny(gray_img, canny_low, canny_high)  # 边缘=255，背景=0
-            
-
-
-
-
-
-
-
-
-    #         # 4. 掩码过滤：仅保留 mask 内的边缘
-    #         canny_masked = cv2.bitwise_and(canny_edges, selected_mask)  # mask 外→0，mask 内边缘→255、背景→0
-
-    #         # 5. 关键：像素值反转（边缘255→0，背景0→255）
-    #         inverted_canny = cv2.bitwise_not(canny_masked)  # 反转后：边缘=0，无边缘=255
-
-    #         # 7. 扩展为 3 通道（与输入图像格式对齐）
-    #         result_inverted = cv2.cvtColor((inverted_canny).astype(np.uint8), cv2.COLOR_GRAY2RGB)
-    #         # cv2.imwrite("final_result.png",final_result)
-    #         result_inverted = result_inverted / 255.0  # 转回 0-1 范围的 float 数组
-            
-    #         # 8. 转为 tensor 格式（BCHW）
-    #         result_inverted = torch.from_numpy(result_inverted).permute(2, 0, 1) 
-    #         result_inverted = result_inverted.float()
-
-
-    #         # 原始
-    #         result_origin = cv2.cvtColor((canny_masked).astype(np.uint8), cv2.COLOR_GRAY2RGB)
-           
-    #         result_origin = result_origin / 255.0  # 转回 0-1 范围的 float 数组
-            
-    #         # 8. 转为 tensor 格式（BCHW）
-    #         result_origin = torch.from_numpy(result_origin).permute(2, 0, 1) 
-    #         result_origin = result_origin.float()
-
-
-    #         mask_list.append(result_origin)
-    #         mask_invert_list.append(result_inverted)
-    #     mask_tensor_invert=torch.stack( mask_invert_list)
-    #     mask_tensor=torch.stack(mask_list)    
-    #     return mask_tensor_invert,mask_tensor
 
 
 
@@ -1835,8 +2584,43 @@ if __name__=='__main__':
     # controlNet_model_path=r"D:\FILELin\postgraduate\little_paper\Adversariall_attack_project\ControlNet\models\control_sd15_canny.pth"
     attack = ADV_ATTACK(device=torch.device("cuda"),model_path=controlNet_model_path,model_path_object_detection=model_path,sam_model_type='vit_h',sam_checkpoint_path=sam_path)
     img=cv2_to_tensor(img,normalize=True)
-    
-    attack.generate_adversarial_main(img,exp_path=r"./exp/test")
+    attack.generate_adversarial_main(img)
+    attack.init_vae()
+    # 测试
+    if img.dim()==3:  # 添加维度
+        img = img.unsqueeze(0)
+    # VAE测试
+    img=move_to_gpu(img)
+    attack.vae.to(device=torch.device("cuda"))
+    img.requires_grad=True
+    attack.vae.eval()
+    start_time=time.time()
+    posterior_vae=attack.vae.encode(img*2-1)
+    latent=posterior_vae.mode()
+    img_g=attack.vae.decode(latent)
+    end_time=time.time()
+    print(f"VAE time: {end_time - start_time:.2f}s")
+    # 转化为0-1
+    img_g=(img_g+1)/2
+    tensor2picture(img_g[0],'test.jpg')
+    temp,_=attack.vae(img*2-1,sample_posterior=False)
+    temp=(temp+1)/2
+    tensor2picture(img_g[0],'test.jpg')
+    loss = torch.nn.functional.mse_loss(img_g, img)  # 对比重建图和原图
+    loss.backward()  # 反向传播，计算梯度
+
+    # 4. 验证梯度是否回传
+    print("===== 梯度验证结果 =====")
+    # 检查 img 的梯度是否存在且非全零
+    if img.grad is not None:
+        grad_norm = torch.norm(img.grad).item()  # 计算梯度范数（标量）
+        print(f"img.grad 存在，梯度范数：{grad_norm:.6f}")
+        if grad_norm > 1e-8:  # 梯度非全零（浮点误差容忍）
+            print("✅ 梯度成功回传到 img！")
+        else:
+            print("❌ img.grad 为全零，梯度未有效回传！")
+    else:
+        print("❌ img.grad 不存在，梯度被截断！")
     # attack.generate_adversarial_example_optim_control_v2(img)
     # attack.generate_adversarial_example(img,control_img)
     # attack.generate_adversarial_example_optim_control_v2(img,control_img)

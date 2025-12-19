@@ -106,7 +106,8 @@ if __name__ == '__main__':
 
         start_time = time.time()
         # attack.generate_adversarial_main_all_mask(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
-        attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
+        # attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
+        attack.generate_adversarial_main_two_stage_V3(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
         # # # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
         # try:
         #     # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
