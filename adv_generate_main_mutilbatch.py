@@ -36,7 +36,7 @@ from adv_attack.util import *
 if __name__ == '__main__':
     # --------------------------
     # 1. 基础配置 
-    # --------------------------
+    # -------------------------- 
 
     root_path=os.path.dirname(__file__)
 
@@ -97,7 +97,7 @@ if __name__ == '__main__':
     # --------------------------
 
 
-    exp_root=os.path.join(root_path,'exp/1213')
+    exp_root=os.path.join(root_path,'exp/1213V4_optim_latent')
     # 获取图片文件名,去除后缀
 
     os.makedirs(exp_root,exist_ok=True) 
@@ -107,7 +107,11 @@ if __name__ == '__main__':
         start_time = time.time()
         # attack.generate_adversarial_main_all_mask(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
         # attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
-        attack.generate_adversarial_main_two_stage_V3(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
+        # attack.generate_adversarial_main_two_stage_V3(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
+        attack.generate_adversarial_main_two_stage_V4(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
+
+
+
         # # # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
         # try:
         #     # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
