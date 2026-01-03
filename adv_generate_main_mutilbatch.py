@@ -30,7 +30,20 @@ from adv_attack.attack_class import *
 from adv_attack.util import *
 
 
+import argparse  # 导入argparse库
 
+# 1. 创建参数解析器
+parser = argparse.ArgumentParser(description="Adversarial Attack Main Program")  # 程序描述
+
+# 2. 添加命令行参数
+
+parser.add_argument('--attack_config_path', type=str, 
+                    default="models/attack_config.yaml",
+                      help="attack config path")
+
+
+# 3. 解析命令行参数
+args = parser.parse_args()
 
 
 if __name__ == '__main__':
@@ -39,27 +52,31 @@ if __name__ == '__main__':
     # -------------------------- 
 
     root_path=os.path.dirname(__file__)
+    attack_config_path=args.attack_config_path
+    adv_config=load_yaml_config(attack_config_path)
 
-    model_path=os.path.join(os.path.join(root_path,'models'),'yolo11n.pt')
-    sam_path=os.path.join(os.path.join(root_path,'models'),'sam_vit_h_4b8939.pth')
-    controlNet_model_path=os.path.join(os.path.join(root_path,'models'),'control_sd15_canny.pth')
-    # controlNet_model_path=os.path.join(os.path.join(root_path,'models'),'control_sd15_scribble.pth')
-    blip_model_path=os.path.join(os.path.join(root_path,'models'),'Salesforceblip_image_captioning_large')
-    attack = ADV_ATTACK(device=torch.device("cuda"),model_path=controlNet_model_path,
-                        model_path_object_detection=model_path,sam_model_type='vit_h',
-                        sam_checkpoint_path=sam_path,
-                        captioner_model_name=blip_model_path)
+
+    attack = ADV_ATTACK(config_path=adv_config["model_paths"]["control_yaml_path"],
+                        model_path=adv_config["model_paths"]["controlnet"],
+                        device=torch.device("cuda"),
+                        detect_model_type=adv_config["model_types"]["detect_model"],
+                        model_path_object_detection=adv_config["model_paths"]["detect_model"],
+                        sam_model_type=adv_config["model_types"]["sam_model"],
+                        sam_checkpoint_path=adv_config["model_paths"]["sam_model"],
+                        captioner_model_name=adv_config["model_paths"]["blip_model"],
+                        inpaint_model_path=adv_config["model_paths"]["inpaint_model"],
+                        vae_model_path=adv_config["model_paths"]["vae_model"],
+                        kwargs=adv_config["attak_params"],
+                        detect_params=adv_config["detect_params"],
+                        )
     
     
     
 
 
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    BATCH_SIZE = 1 
-    IMG_SIZE = 512  
-    IMG_ROOT = r"data/select_coco"  # 整理后的验证集根目录
-    IMG_ROOT=r"D:\FILELin\postgraduate\little_paper\coco\val2017\select_coco"
-    IMG_ROOT=r"D:\FILELin\postgraduate\little_paper\coco\val2017\coco_select_v2"
+    BATCH_SIZE = adv_config["experiment_params"]["batch_size"]
+    IMG_SIZE = adv_config["experiment_params"]["image_size"]  
+    IMG_ROOT=adv_config["experiment_params"]["dataset_path"]
     # --------------------------
     # 2. 验证集预处理（无数据增强！）
     # --------------------------
@@ -86,7 +103,7 @@ if __name__ == '__main__':
         img_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,  
-        num_workers=4,
+        num_workers=adv_config["experiment_params"]["num_workers"],
         pin_memory=True
     )
 
@@ -96,32 +113,26 @@ if __name__ == '__main__':
     # 4. 迭代（对抗样本生成）
     # --------------------------
 
-
-    exp_root=os.path.join(root_path,'exp/1213V4_optim_latent')
+  
+    exp_root=adv_config["experiment_params"]["experiment_path"]
     # 获取图片文件名,去除后缀
 
     os.makedirs(exp_root,exist_ok=True) 
-
-    for batch_idx, (images, images_path) in enumerate(img_loader):
+    pbar = tqdm(enumerate(img_loader), total=len(img_loader), desc="Processing images", unit="batch")
+    for batch_idx, (images, images_path) in pbar:
 
         start_time = time.time()
-        # attack.generate_adversarial_main_all_mask(images,exp_path=exp_root,images_path=images_path,mask_select_statues=1)
-        # attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
-        # attack.generate_adversarial_main_two_stage_V3(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
-        attack.generate_adversarial_main_two_stage_V4(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
 
+        attack.generate_adversarial_main_two_stage_V4(images,
+                                                        exp_path=exp_root,
+                                                        images_path=images_path,
+                                                        mask_select_statues=0)
 
-
-        # # # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
-        # try:
-        #     # attack.generate_adversarial_main(images,exp_path=exp_path,mask_select_statues=1)
-        #     # attack.generate_adversarial_main_all_mask(images,exp_path=exp_path,mask_select_statues=0)
-        #     attack.generate_adversarial_main_two_stage(images,exp_path=exp_root,images_path=images_path,mask_select_statues=0)
-        # except:
-        #     print("error")
         
         end_time = time.time()
         elapsed_time = end_time - start_time
 
         print(f"代码运行耗时：{elapsed_time:.2f} 秒")  # 保留2位小数，输出：2.00 秒
         attack.destroy_controlnet()
+
+

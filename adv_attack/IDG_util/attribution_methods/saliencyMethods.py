@@ -81,11 +81,12 @@ import os
 def IG_Detection(
     input_img,  # 输入图像张量 (B, 3, H, W)，归一化到 0-1
     det_model,  # ObjectDetection 实例
+    model_type=None,
     steps=50,
     batch_size=10,
     alpha_star=1.0,
     baseline=0.0,  # 基线图像（0=全黑，可传入(B,3,H,W)张量）
-    target_obj_idx=0  # 要归因的目标索引（每个batch内的第几个目标）
+    target_obj=0  # 要归因的目标索引（每个batch内的第几个目标）
 ):
     """
     适配目标检测的集成梯度（IG/LIG）归因方法（支持多batch）
@@ -140,12 +141,17 @@ def IG_Detection(
         # 生成插值图像：(batch_size, B, 3, H, W)
         interp_imgs = baseline + current_alphas * baseline_diff  # 广播适配
 
-        # 展开维度用于模型推理：(batch_size*B, 3, H, W)
+        # 展开维度用于模型推理：(batch_size*B, 3, H, W),先batch、后通道维度
         interp_imgs_flat = interp_imgs.reshape(-1, C, H, W)
-        
+        # 扩展目标索引
+
+        target_obj_idx =  [item for item in target_obj for _ in range(batch_size)] 
         # 计算当前批次的梯度和目标置信度（需确保getGradientsDetection支持多batch）
         batch_grads_flat, batch_scores_flat = getGradientsDetection(
-            interp_imgs_flat, det_model, target_obj_idx
+                                                interp_imgs=interp_imgs_flat,
+                                                det_model= det_model,
+                                                target_obj_idx= target_obj_idx,
+                                                model_type= model_type
         )
         
         # 恢复维度：(batch_size, B, 3, H, W)
@@ -255,7 +261,7 @@ def IDG_Detection(
 # ------------------------------
 # 2. 适配检测模型的辅助函数
 # ------------------------------
-def getGradientsDetection(interp_imgs, det_model, target_obj_idx):
+def getGradientsDetection(interp_imgs, det_model, target_obj_idx,model_type=None):
     """
     修复：直接为批量张量启用梯度，避免非叶子张量修改错误
     计算插值图像对特定目标置信度的梯度
@@ -271,21 +277,23 @@ def getGradientsDetection(interp_imgs, det_model, target_obj_idx):
     # 关键修复：为整个批量张量启用梯度（interp_imgs 是叶子张量）
     interp_imgs=interp_imgs.clone().detach().to(det_model.device)
     interp_imgs.requires_grad = True
-    det_model.model.zero_grad()  # 清空模型梯度
+    det_model.models[model_type].zero_grad()  # 清空模型梯度
 
     # 批量推理（一次处理整个批次，提升效率）
     for i in range(batch_size):
         img = interp_imgs[i:i+1]  # 取单个图像 (1, 3, H, W)，仍共享批量张量的梯度
-        results,_ = det_model.detect(img, grad_status=True)
+        results,_ = det_model.detect(img,model_type=model_type, grad_status=True)
 
         # 提取特定目标的类别置信度（若检测不到目标，置信度设为0）
-        if len(results['scores'][0]) <= target_obj_idx:
+        if len(results['scores'][0]) <= 0:
             score = torch.tensor(0.0, device=img.device, requires_grad=True)
             target_scores.append(score)
             continue
             # score = torch.tensor(0.0, device=img.device, requires_grad=True)
         else:
-            score = results['scores'][0][target_obj_idx]  # (1,) 张量
+            # 判断是否是目标label
+            score=get_max_score_for_label(results,target_obj_idx[i])
+            # score = results['scores'][0][target_obj_idx[i]]  # (1,) 张量
 
         # 存储置信度（后续统一反向传播）
         target_scores.append(score)
@@ -573,3 +581,60 @@ if __name__ == "__main__":
         visualize_attribution(input_img, attributions, save_path="ig_detection_result.png")
     else:
         print("Attribution failed!")
+
+
+
+
+
+
+
+
+def get_max_score_for_label(results: dict, ref_label: int) -> torch.Tensor:
+    """
+    找到与参考label匹配的最大score（全程张量操作，保留梯度，不转换类型）
+    
+    Args:
+        results: 检测结果字典，'labels'/'scores' 为张量列表（GPU/CPU均可）
+        ref_label: 参考标签（目标整数）
+    
+    Returns:
+        torch.Tensor: 匹配参考label的最大score张量（标量）；无匹配返回 0.0 标量张量（保留梯度图）
+    """
+    # 初始化最大score为0.0标量张量（与输入张量同设备、同dtype，保证梯度兼容）
+    max_score = None
+
+
+
+    # 遍历batch维度，全程张量操作
+    for batch_idx in range(len(results['labels'])):
+        label_tensor = results['labels'][batch_idx]  # 保留梯度的张量
+        score_tensor = results['scores'][batch_idx]  # 保留梯度的张量
+
+        # 1. 张量维度统一（兼容标量/一维张量）
+        label_flat = label_tensor.flatten()  # 展平为一维，不影响梯度
+        score_flat = score_tensor.flatten()  # 展平为一维，不影响梯度
+
+        # 2. 筛选匹配ref_label的label（张量比较，保留梯度）
+        # 生成匹配掩码：1表示匹配，0表示不匹配
+        match_mask = (label_flat == ref_label).float()
+        # 仅保留匹配项的score，不匹配项置0
+        matched_score = score_flat * match_mask
+
+        # 3. 取当前batch的最大匹配score（标量张量）
+        curr_max = matched_score.max()
+
+        # 4. 更新全局最大score（张量操作，保留梯度）
+        if max_score is None:
+            max_score = curr_max
+        else:
+            # 取两个张量的最大值（保留梯度）
+            max_score = torch.max(max_score, curr_max)
+
+    # 无匹配时返回0.0标量张量（开启梯度）
+    if max_score is None:
+        # 自动匹配输入张量的设备和dtype
+        device = results['scores'][0].device
+        dtype = results['scores'][0].dtype
+        max_score = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
+
+    return max_score

@@ -1,3 +1,4 @@
+import copy
 import gc
 import math
 import os
@@ -16,6 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Any,Tuple, Dict, List,Union
 from contextlib import suppress
 import pytorch_lightning as pl
+import yaml
 # 纯PyTorch实现的匈牙利算法（无改动，确保不依赖外部库）
 # def hungarian_matching(cost_matrix):
 #     """
@@ -166,9 +168,10 @@ def hungarian_matching(cost_matrix):
 
 
 # 定义YOLOv11检测损失函数（适配输入结构：无logits）
+# 默认输出的是对抗损失，输出的loss 需要最小化，
 class YOLOv11DetectionLoss(nn.Module):
-    def __init__(self, num_classes=80, weight_class=1.0, 
-                 weight_bbox_l1=1.0, weight_giou=1.0,** args):
+    def __init__(self, num_classes=80,
+                 ** args):
         """
         初始化 YOLOv11 检测损失函数（适配无logits输入）
         Args:
@@ -185,25 +188,55 @@ class YOLOv11DetectionLoss(nn.Module):
         self.num_classes = num_classes
         self.conf_thres = self.conf_threshold
         self.iou_thres = self.iou_threshold
-        self.weight_class = weight_class
-        self.weight_bbox_l1 = weight_bbox_l1
-        self.weight_giou = weight_giou
+        if not hasattr(self, 'adv_loss_type'):  # 判断是否存在属性
+            self.adv_loss_type = 0
+        else :
+            self.adv_loss_type = self.adv_loss_type
+
+        if not hasattr(self, 'adv_weight_class'):  # 判断是否存在属性
+            self.weight_class = 1
+        else :
+            self.weight_class = self.adv_weight_class
+   
+
+        if not hasattr(self, 'adv_weight_bbox_l1'):  # 判断是否存在属性
+            self.weight_bbox_l1 = 1
+        else :
+            self.weight_bbox_l1 = self.adv_weight_bbox_l1
+
+        if not hasattr(self, 'adv_weight_giou'):  # 判断是否存在属性
+            self.weight_giou = 1
+        else :
+            self.weight_giou = self.adv_weight_giou
+
+
         # 判断是否存在penalty_bbox，不存在则创建
         if not hasattr(self, 'penalty_bbox'):  # 判断是否存在属性
-            self.penalty_bbox = 1
+            # 对抗损失，默认没有检测到就是最好，所以取-1，因为后面总损失都是相加
+            self.penalty_bbox = -1
         if not hasattr(self, 'penalty_giou'):  # 判断是否存在属性
-            self.penalty_giou =1
+            # giou损失，默认没有检测到就是最好，所以取0，因为后面总损失都是相加
+            # 这里直接计算的就是IOU，不包含负数
+            self.penalty_giou =0
             
         if not hasattr(self, 'penalty_class'):  # 判断是否存在属性
             # 交叉熵损失的最大值，与类别有关
+            if self.adv_loss_type == 0:  # 默认使用交叉熵
+                self.penalty_class = -13.82
+            elif self.adv_loss_type == 1:  # 默认预测的概率最小，最小是0
+                self.penalty_class = 0
+            elif self.adv_loss_type == 2:  # 默认使用L1
+                self.penalty_class = -13.8155
+
             
-            self.penalty_class = 13.82
-        if not hasattr(self, 'image_resolution'):  # 判断是否存在属性
+        if not hasattr(self, 'image_size'):  # 判断是否存在属性
             self.image_resolution = 512
+        else :
+            self.image_resolution = self.image_size
 
         # 基础损失函数（分类损失改用交叉熵的简化形式，适配离散标签）
-        self.class_criterion = nn.NLLLoss(reduction="none")  # 负对数似然损失（需输入log概率）
-        self.bbox_l1_criterion = nn.L1Loss(reduction="none")  # 边界框L1损失（不自动降维）
+        self.class_criterion = nn.NLLLoss()  # 负对数似然损失（需输入log概率）
+        self.bbox_l1_criterion = nn.L1Loss()  # 边界框L1损失（不自动降维）
 
     def _hungarian_matching(self, pred_boxes, pred_scores, pred_labels, gt_boxes, gt_labels):
         """
@@ -273,121 +306,179 @@ class YOLOv11DetectionLoss(nn.Module):
         return iou
     # def forward(self, pred_result, gt_result):
     #     """
-    #     简化版前向传播：适配输入结构（pred_result仅含boxes/scores/labels）
+    #     遍历每个真实框（gt）单独计算损失，确保每个gt都参与损失计算
     #     Args:
-    #         pred_result: 模型预测结果（与你的输入结构完全一致）
+    #         pred_result: 模型预测结果
     #             'boxes': list[tensor] → [B个元素，每个元素 shape [M_b, 4] (xyxy)]
-    #             'scores': list[tensor] → [B个元素，每个元素 shape [M_b]]（置信度）
-    #             'labels': list[tensor] → [B个元素，每个元素 shape [M_b]]（预测类别，0~num_classes-1）
-    #         gt_result: 真实标签（格式与pred_result对齐，无scores）
+    #             'scores': list[tensor] → [B个元素，每个元素 shape [M_b]]
+    #             'labels': list[tensor] → [B个元素，每个元素 shape [M_b]]
+    #         gt_result: 真实标签
     #             'boxes': list[tensor] → [B个元素，每个元素 shape [K_b, 4] (xyxy)]
-    #             'labels': list[tensor] → [B个元素，每个元素 shape [K_b]]（真实类别，0~num_classes-1）
+    #             'labels': list[tensor] → [B个元素，每个元素 shape [K_b]]
     #     Returns:
     #         total_loss: 总损失（标量）
     #         loss_dict: 各任务损失明细（dict of 标量）
-    #     """
-    #     # 确定设备（避免空输入报错）
-    #     if len(pred_result['boxes']) == 0 or pred_result['boxes'][0].numel() == 0:
+    #     """   
+    #     # 确定设备
+    #     if len(pred_result['boxes']) == 0 or (len(pred_result['boxes']) > 0 and pred_result['boxes'][0].numel() == 0):
     #         device = torch.device('cpu')
     #     else:
     #         device = pred_result['boxes'][0].device
             
-    #     # 初始化损失累计变量
+    #     # 初始化损失累计变量（按每个gt单独计算）
     #     total_class_loss = torch.tensor(0.0, device=device)
     #     total_bbox_l1_loss = torch.tensor(0.0, device=device)
     #     total_giou_loss = torch.tensor(0.0, device=device)
-    #     total_valid_boxes = 0  # 统计匹配成功的框对数量（用于平均损失）
+    #     total_gt_count = 0  # 统计总真实框数量（用于平均损失）
 
-    #     # 遍历每个batch样本计算损失
     #     batch_size = len(pred_result['boxes'])
     #     if batch_size == 0:
-    #         # 没有检测到框
-    #         print("没有检测到框")
+    #         # 空batch处理
     #         total_bbox_l1_loss = torch.tensor(self.penalty_bbox, device=device)
     #         total_giou_loss = torch.tensor(self.penalty_giou, device=device)
-    #         total_class_loss=torch.tensor(self.penalty_class, device=device)
-    #         total_loss=total_class_loss+total_bbox_l1_loss+total_giou_loss
-    #         return total_loss, {'total_loss': total_loss, 'class_loss': total_class_loss,
-    #                              'bbox_l1_loss': total_bbox_l1_loss, 'giou_loss': total_giou_loss}
-            
+    #         total_class_loss = torch.tensor(self.penalty_class, device=device)
+    #         total_loss = total_class_loss + total_bbox_l1_loss + total_giou_loss
+    #         return total_loss, {
+    #             'total_loss': total_loss,
+    #             'class_loss': total_class_loss,
+    #             'bbox_l1_loss': total_bbox_l1_loss,
+    #             'giou_loss': total_giou_loss
+    #         }
+        
     #     for b in range(batch_size):
-    #         # 1. 提取单样本数据（确保设备一致）
+    #         # 提取单样本数据
     #         pred_boxes = pred_result['boxes'][b].to(device)  # [M_b, 4]
     #         pred_scores = pred_result['scores'][b].to(device)  # [M_b]
     #         pred_labels = pred_result['labels'][b].to(device)  # [M_b]
+    #         pred_scores_vector=pred_result['scores_vector'][b].to(device)
     #         gt_boxes = gt_result['boxes'][b].to(device)  # [K_b, 4]
     #         gt_labels = gt_result['labels'][b].to(device)  # [K_b]
+    #         gt_scores_vector=gt_result['scores_vector'][b].to(device)
+    #         K_b = gt_boxes.shape[0]  # 该样本的真实框数量
+    #         if K_b == 0:
+    #             continue  # 无真实框则跳过
+    #         total_gt_count += K_b  # 累计总真实框数量
 
-    #         # 2. 过滤低置信度预测框（减少无效计算）
+    #         # 过滤低置信度预测框
     #         pred_mask = pred_scores >= self.conf_thres
     #         pred_boxes = pred_boxes[pred_mask]
     #         pred_scores = pred_scores[pred_mask]
     #         pred_labels = pred_labels[pred_mask]
-    #         M_b, K_b = pred_boxes.shape[0], gt_boxes.shape[0]
+    #         pred_scores_vector=pred_scores_vector[pred_mask]
+    #         M_b = pred_boxes.shape[0]  # 过滤后的预测框数量
 
-    #         # 3. 若无预测框或无真实框，跳过该样本
-    #         if M_b == 0 or K_b == 0:
-    #             continue
+    #         # 遍历该样本的每个真实框（核心修改：循环所有gt）
+    #         for gt_idx in range(K_b):
+    #             # 提取当前真实框（单独处理）
+    #             current_gt_box = gt_boxes[gt_idx:gt_idx+1]  # [1, 4]（保持维度）
+    #             current_gt_label = gt_labels[gt_idx:gt_idx+1]  # [1]
+    #             current_gt_scores_vector=gt_scores_vector[gt_idx:gt_idx+1]
+    #             if M_b == 0:
+    #                 # 无预测框：对当前gt施加惩罚损失
+    #                 total_class_loss += torch.tensor(self.penalty_class, device=device)
+    #                 # bbox 惩罚损失，偏差越大越好，所以减去偏差最大，减去1
+    #                 total_bbox_l1_loss += torch.tensor(self.penalty_bbox, device=device)
+    #                 # iou 正常是0-1 ，无效说明最好，所以取0
+    #                 total_giou_loss += torch.tensor(self.penalty_giou, device=device)
+    #                 continue
 
-    #         # 4. 匈牙利算法匹配框对
-    #         pred_idx, gt_idx = self._hungarian_matching(
-    #             pred_boxes, pred_scores, pred_labels, gt_boxes, gt_labels
-    #         )
-    #         T = pred_idx.shape[0]  # 匹配成功的框对数量
-    #         if T == 0:
-    #             total_bbox_l1_loss += torch.tensor(self.penalty_bbox, device=device)
-    #             total_giou_loss += torch.tensor(self.penalty_giou, device=device)
+    #             # 为当前真实框匹配最优预测框（简化匹配：计算与当前gt的成本）
+    #             # 1. 计算当前gt与所有预测框的IoU [M_b, 1]
+    #             iou_matrix = self._compute_iou(pred_boxes, current_gt_box)  # [M_b, 1]
                 
-    #             total_class_loss+=torch.tensor(self.penalty_class, device=device)
-    #             continue
-    #         total_valid_boxes += T
+    #             # 2. 计算成本矩阵 [M_b, 1]
+    #             class_match = (pred_labels.unsqueeze(1) == current_gt_label).float()  # [M_b, 1]
+    #             confidence_term = pred_scores.unsqueeze(1)  # [M_b, 1]
+    #             cost_matrix = -(confidence_term * iou_matrix) + (1 - class_match) * 100  # 成本越低越好
+                
+    #             # 3. 选择成本最低的预测框作为匹配
+    #             min_cost, best_pred_idx = torch.min(cost_matrix, dim=0)  # 找到最优预测框索引
+    #             best_pred_idx = best_pred_idx.item()  # 转为标量索引
 
-    #         # 5. 提取匹配成功的框对和标签
-    #         matched_pred_boxes = pred_boxes[pred_idx]  # [T, 4]
-    #         matched_pred_scores = pred_scores[pred_idx]  # [T]（用于分类损失的置信度加权）
-    #         matched_pred_labels = pred_labels[pred_idx]  # [T]
-    #         matched_gt_boxes = gt_boxes[gt_idx]  # [T, 4]
-    #         matched_gt_labels = gt_labels[gt_idx]  # [T]
+    #             # 4. 检查匹配有效性（IoU达标+类别匹配）
+    #             # valid = (iou_matrix[best_pred_idx] >= self.iou_thres) 
+    #             valid = (iou_matrix[best_pred_idx] >= 0)
+    #             if not valid:
+    #                 # 无效匹配：施加惩罚
 
-    #         # 6. 计算分类损失（适配离散标签：用置信度作为"伪概率"的对数）
-    #         # 逻辑：置信度→归一化到(0,1)→取log→作为NLLLoss的输入（模拟分类概率）
-    #         pred_log_probs = torch.log(matched_pred_scores.clamp(min=1e-6, max=1.0))  # 避免log(0)
-    #         # 构建"类别-概率"映射：仅匹配的类别对应log概率，其他类别为-∞（确保NLLLoss正确计算）
-    #         class_log_probs = torch.full((T, self.num_classes), -float('inf'), device=device)
-    #         class_log_probs[torch.arange(T), matched_pred_labels] = pred_log_probs
-    #         # 计算分类损失（NLLLoss：输入[batch, class_num]，目标[batch]）
-    #         class_loss = self.class_criterion(class_log_probs, matched_gt_labels).sum()
-    #         total_class_loss += class_loss
+    #                 total_class_loss += torch.tensor(self.penalty_class, device=device)
+    #                 # bbox 惩罚损失，偏差越大越好，所以减去偏差最大，减去1
+    #                 total_bbox_l1_loss += torch.tensor(self.penalty_bbox, device=device)
+    #                 # iou 正常是0-1 ，无效说明最好，所以取0
+    #                 total_giou_loss += torch.tensor(self.penalty_giou, device=device)                    
+                    
+    #                 continue
 
-    #         # 7. 计算边界框L1损失（坐标误差：x1,y1,x2,y2的绝对误差和）
-    #         bbox_l1_loss = self.bbox_l1_criterion(matched_pred_boxes, matched_gt_boxes).sum(dim=1).sum()
-    #         total_bbox_l1_loss += (bbox_l1_loss/(  4*self.image_resolution))
+    #             # 5. 提取匹配的预测框
+    #             matched_pred_box = pred_boxes[best_pred_idx:best_pred_idx+1]  # [1, 4]
+    #             matched_pred_score = pred_scores[best_pred_idx:best_pred_idx+1]  # [1]
+    #             matched_pred_label = pred_labels[best_pred_idx:best_pred_idx+1]  # [1]
+    #             matched_pred_scores_vector=pred_scores_vector[best_pred_idx:best_pred_idx+1]
+                
+    #             # 6. 计算分类损失（当前gt的分类损失）
+    #             # pred_log_prob = torch.log(matched_pred_score.clamp(min=1e-6, max=1.0))  # [1]
+    #             # class_log_probs = torch.full((1, self.num_classes),  -1e6, device=device)
+    #             # class_log_probs[0, matched_pred_label] = pred_log_prob
+    #             # class_loss = self.class_criterion(class_log_probs, current_gt_label).sum()
+    #             # log计算
+    #             matched_pred_scores_vector_log=torch.log(matched_pred_scores_vector.clamp(min=1e-6, max=1.0))
+    #             # 默认返回的都是对抗损失
+    #             if self.adv_loss_type==0:
+    #                 # 0表示与gt的交叉熵最大
+    #                 class_loss = self.class_criterion(matched_pred_scores_vector_log, current_gt_label)
+    #                 class_loss=-class_loss
+                
+    #             elif self.adv_loss_type==1:
+    #                 # 当前预测类别的概率最小
 
-    #         # 8. 计算GIoU损失（重叠度误差：1 - GIoU，确保损失非负）
-    #         giou = generalized_box_iou(matched_pred_boxes, matched_gt_boxes)  # [T]
-    #         giou_loss = (1 - giou).sum()  # GIoU损失求和
-    #         total_giou_loss += giou_loss
+    #                 pred_label_scalar = matched_pred_label.item()  # 单个预测类别索引
+    
+    #                 pred_log_prob = matched_pred_scores_vector[0, pred_label_scalar]  # 当前类别的对数概率
 
-    #     # 9. 计算平均损失（避免无匹配框时除以0）
-    #     # if total_valid_boxes == 0:
-    #     #     class_loss_avg = torch.tensor(0.0, device=device)
-    #     #     bbox_l1_loss_avg = torch.tensor(0.0, device=device)
-    #     #     giou_loss_avg = torch.tensor(0.0, device=device)
-    #     # else:
-    #     if total_valid_boxes != 0:
-            
-    #         class_loss_avg = total_class_loss / total_valid_boxes
-    #         bbox_l1_loss_avg = total_bbox_l1_loss / total_valid_boxes
-    #         giou_loss_avg = total_giou_loss / total_valid_boxes
+    #                 class_loss = pred_log_prob
+    #             elif self.adv_loss_type==2:
+    #                 # 
 
-    #     # 10. 总损失 = 各任务损失 × 权重之和
+    #                 log_probs = matched_pred_scores_vector_log # [1, num_classes]，log(p_i)
+
+    #                 # 步骤2：提取原始类别y和目标类别y_adv的对数概率
+    #                 # 默认预测的目标类型
+    #                 y = matched_pred_label.item() if isinstance(matched_pred_label, torch.Tensor) else current_gt_label
+    #                 # 当此模式，默认参考的是对抗样本的标签
+    #                 y_adv = current_gt_label.item() if isinstance(current_gt_label, torch.Tensor) else target_adv_label
+
+    #                 log_p_y = log_probs[0, y]  # log(p_y(x'))，原始类别的对数概率
+    #                 log_p_yadv = log_probs[0, y_adv]  # log(p_yadv(x'))，目标类别的对数概率
+
+    #                 # 步骤3：计算目标攻击损失：-log(p_yadv(x')) + log(p_y(x'))
+    #                 class_loss = -log_p_yadv + log_p_y
+
+
+    #             total_class_loss += class_loss
+    #             # 7. 计算边界框L1损失
+    #             bbox_l1_loss = self.bbox_l1_criterion(matched_pred_box, current_gt_box)
+    #             # 要使得偏差变大，所以要取负
+    #             total_bbox_l1_loss -= (bbox_l1_loss / (4 * self.image_resolution))  # 归一化
+
+    #             # 8. 计算GIoU损失，对抗损失，所以不需要1-IOU
+    #             giou = generalized_box_iou(matched_pred_box, current_gt_box)  # [1]
+    #             giou_loss = (giou).sum()
+    #             total_giou_loss += giou_loss
+
+    #     # 计算平均损失（除以总真实框数量）
+
+    #     if total_gt_count > 0:
+    #         class_loss_avg = total_class_loss / total_gt_count
+    #         bbox_l1_loss_avg = total_bbox_l1_loss / total_gt_count
+    #         giou_loss_avg = total_giou_loss / total_gt_count
+
+    #     # 总损失 = 加权和
     #     total_loss = (
     #         class_loss_avg * self.weight_class +
     #         bbox_l1_loss_avg * self.weight_bbox_l1 +
     #         giou_loss_avg * self.weight_giou
     #     )
 
-    #     # 11. 输出损失明细（便于调试和监控）
     #     loss_dict = {
     #         'class_loss': class_loss_avg,
     #         'bbox_l1_loss': bbox_l1_loss_avg,
@@ -396,18 +487,20 @@ class YOLOv11DetectionLoss(nn.Module):
     #     }
 
     #     return total_loss, loss_dict
-
     def forward(self, pred_result, gt_result):
         """
         遍历每个真实框（gt）单独计算损失，确保每个gt都参与损失计算
+        关键改造：每个GT匹配后排除对应预测框，后续GT仅在剩余预测框中匹配
         Args:
             pred_result: 模型预测结果
                 'boxes': list[tensor] → [B个元素，每个元素 shape [M_b, 4] (xyxy)]
                 'scores': list[tensor] → [B个元素，每个元素 shape [M_b]]
                 'labels': list[tensor] → [B个元素，每个元素 shape [M_b]]
+                'scores_vector': list[tensor] → [B个元素，每个元素 shape [M_b, num_classes]]
             gt_result: 真实标签
                 'boxes': list[tensor] → [B个元素，每个元素 shape [K_b, 4] (xyxy)]
                 'labels': list[tensor] → [B个元素，每个元素 shape [K_b]]
+                'scores_vector': list[tensor] → [B个元素，每个元素 shape [K_b, num_classes]]
         Returns:
             total_loss: 总损失（标量）
             loss_dict: 各任务损失明细（dict of 标量）
@@ -443,10 +536,10 @@ class YOLOv11DetectionLoss(nn.Module):
             pred_boxes = pred_result['boxes'][b].to(device)  # [M_b, 4]
             pred_scores = pred_result['scores'][b].to(device)  # [M_b]
             pred_labels = pred_result['labels'][b].to(device)  # [M_b]
-            pred_scores_vector=pred_result['scores_vector'][b].to(device)
+            pred_scores_vector = pred_result['scores_vector'][b].to(device)  # [M_b, num_classes]
             gt_boxes = gt_result['boxes'][b].to(device)  # [K_b, 4]
             gt_labels = gt_result['labels'][b].to(device)  # [K_b]
-            gt_scores_vector=gt_result['scores_vector'][b].to(device)
+            gt_scores_vector = gt_result['scores_vector'][b].to(device)  # [K_b, num_classes]
             K_b = gt_boxes.shape[0]  # 该样本的真实框数量
             if K_b == 0:
                 continue  # 无真实框则跳过
@@ -457,75 +550,105 @@ class YOLOv11DetectionLoss(nn.Module):
             pred_boxes = pred_boxes[pred_mask]
             pred_scores = pred_scores[pred_mask]
             pred_labels = pred_labels[pred_mask]
-            pred_scores_vector=pred_scores_vector[pred_mask]
+            pred_scores_vector = pred_scores_vector[pred_mask]
             M_b = pred_boxes.shape[0]  # 过滤后的预测框数量
 
-            # 遍历该样本的每个真实框（核心修改：循环所有gt）
+            # 核心改造1：维护未被匹配的预测框索引集合（初始为所有索引）
+            unmatched_pred_indices = torch.arange(M_b, device=device)  # [0,1,...,M_b-1]
+
+            # 遍历该样本的每个真实框
             for gt_idx in range(K_b):
                 # 提取当前真实框（单独处理）
                 current_gt_box = gt_boxes[gt_idx:gt_idx+1]  # [1, 4]（保持维度）
                 current_gt_label = gt_labels[gt_idx:gt_idx+1]  # [1]
-                current_gt_scores_vector=gt_scores_vector[gt_idx:gt_idx+1]
-                if M_b == 0:
-                    # 无预测框：对当前gt施加惩罚损失
+                current_gt_scores_vector = gt_scores_vector[gt_idx:gt_idx+1]  # [1, num_classes]
+
+                # 核心改造2：检查剩余未匹配的预测框数量
+                if len(unmatched_pred_indices) == 0:
+                    # 无剩余预测框：对当前gt施加惩罚损失
                     total_class_loss += torch.tensor(self.penalty_class, device=device)
                     total_bbox_l1_loss += torch.tensor(self.penalty_bbox, device=device)
                     total_giou_loss += torch.tensor(self.penalty_giou, device=device)
                     continue
 
-                # 为当前真实框匹配最优预测框（简化匹配：计算与当前gt的成本）
-                # 1. 计算当前gt与所有预测框的IoU [M_b, 1]
-                iou_matrix = self._compute_iou(pred_boxes, current_gt_box)  # [M_b, 1]
-                
-                # 2. 计算成本矩阵 [M_b, 1]
-                class_match = (pred_labels.unsqueeze(1) == current_gt_label).float()  # [M_b, 1]
-                confidence_term = pred_scores.unsqueeze(1)  # [M_b, 1]
-                cost_matrix = -(confidence_term * iou_matrix) + (1 - class_match) * 100  # 成本越低越好
-                
-                # 3. 选择成本最低的预测框作为匹配
-                min_cost, best_pred_idx = torch.min(cost_matrix, dim=0)  # 找到最优预测框索引
-                best_pred_idx = best_pred_idx.item()  # 转为标量索引
+                # 提取未被匹配的预测框子集
+                sub_pred_boxes = pred_boxes[unmatched_pred_indices]  # [M_remain, 4]
+                sub_pred_scores = pred_scores[unmatched_pred_indices]  # [M_remain]
+                sub_pred_labels = pred_labels[unmatched_pred_indices]  # [M_remain]
+                sub_pred_scores_vector = pred_scores_vector[unmatched_pred_indices]  # [M_remain, num_classes]
 
-                # 4. 检查匹配有效性（IoU达标+类别匹配）
-                valid = (iou_matrix[best_pred_idx] >= self.iou_thres) 
+                # 1. 计算当前gt与剩余预测框的IoU [M_remain, 1]
+                iou_matrix = self._compute_iou(sub_pred_boxes, current_gt_box)  # [M_remain, 1]
+                
+                # 2. 计算成本矩阵 [M_remain, 1]
+                class_match = (sub_pred_labels.unsqueeze(1) == current_gt_label).float()  # [M_remain, 1]
+                confidence_term = sub_pred_scores.unsqueeze(1)  # [M_remain, 1]
+                # cost_matrix = -(confidence_term * iou_matrix) + (1 - class_match) * 100  # 成本越低越好
+                cost_matrix = -(confidence_term * iou_matrix) 
+                # 3. 选择成本最低的预测框（在剩余子集内的索引）
+                min_cost, sub_best_idx = torch.min(cost_matrix, dim=0)  # sub_best_idx: 子集内的索引
+                sub_best_idx = sub_best_idx.item()  # 转为标量
+
+                # 4. 映射回原始预测框的索引，并检查匹配有效性
+                best_pred_idx = unmatched_pred_indices[sub_best_idx]  # 子集索引 → 原始索引
+                # valid = (iou_matrix[best_pred_idx] >= self.iou_thres) 
+                valid = (iou_matrix[sub_best_idx] >= 0)  # 检查IoU有效性
                 if not valid:
                     # 无效匹配：施加惩罚
                     total_class_loss += torch.tensor(self.penalty_class, device=device)
                     total_bbox_l1_loss += torch.tensor(self.penalty_bbox, device=device)
-                    total_giou_loss += torch.tensor(self.penalty_giou, device=device)
+                    total_giou_loss += torch.tensor(self.penalty_giou, device=device)                    
                     continue
 
-                # 5. 提取匹配的预测框
+                # 核心改造3：从未匹配集合中移除当前匹配的预测框索引
+                unmatched_pred_indices = unmatched_pred_indices[unmatched_pred_indices != best_pred_idx]
+
+                # 5. 提取匹配的预测框（原始索引）
                 matched_pred_box = pred_boxes[best_pred_idx:best_pred_idx+1]  # [1, 4]
                 matched_pred_score = pred_scores[best_pred_idx:best_pred_idx+1]  # [1]
                 matched_pred_label = pred_labels[best_pred_idx:best_pred_idx+1]  # [1]
-                matched_pred_scores_vector=pred_scores_vector[best_pred_idx:best_pred_idx+1]
+                matched_pred_scores_vector = pred_scores_vector[best_pred_idx:best_pred_idx+1]  # [1, num_classes]
                 
-                # 6. 计算分类损失（当前gt的分类损失）
-                # pred_log_prob = torch.log(matched_pred_score.clamp(min=1e-6, max=1.0))  # [1]
-                # class_log_probs = torch.full((1, self.num_classes),  -1e6, device=device)
-                # class_log_probs[0, matched_pred_label] = pred_log_prob
-                # class_loss = self.class_criterion(class_log_probs, current_gt_label).sum()
-                # log计算
-                matched_pred_scores_vector_log=torch.log(matched_pred_scores_vector.clamp(min=1e-6, max=1.0))
-                class_loss = self.class_criterion(matched_pred_scores_vector_log, current_gt_label).sum()
+                # 6. 计算分类损失（对抗损失逻辑）
+                matched_pred_scores_vector_log = torch.log(matched_pred_scores_vector.clamp(min=1e-6, max=1.0))
+                if self.adv_loss_type == 0:
+                    # 与gt的交叉熵取负（最大化交叉熵）
+                    class_loss = self.class_criterion(matched_pred_scores_vector_log, current_gt_label)
+                    class_loss = -class_loss
+                elif self.adv_loss_type == 1:
+                    # 当前预测类别的概率最小（取该类别的log概率）
+                    pred_label_scalar = matched_pred_label.item()
+                    pred_log_prob = matched_pred_scores_vector[0, pred_label_scalar]
+                    class_loss = pred_log_prob
+                elif self.adv_loss_type == 2:
+                    # 攻击损失：-log(p_yadv) + log(p_y)
+                    log_probs = matched_pred_scores_vector_log  # [1, num_classes]
+                    y = matched_pred_label.item()
+                    y_adv = current_gt_label.item()
+                    log_p_y = log_probs[0, y]
+                    log_p_yadv = log_probs[0, y_adv]
+                    class_loss = -log_p_yadv + log_p_y
                 total_class_loss += class_loss
 
-                # 7. 计算边界框L1损失
-                bbox_l1_loss = self.bbox_l1_criterion(matched_pred_box, current_gt_box).sum(dim=1).sum()
-                total_bbox_l1_loss += (bbox_l1_loss / (4 * self.image_resolution))  # 归一化
+                # 7. 计算边界框L1损失（取负，最大化偏差）
+                bbox_l1_loss = self.bbox_l1_criterion(matched_pred_box, current_gt_box)
+                total_bbox_l1_loss -= (bbox_l1_loss / (4 * self.image_resolution))  # 归一化
 
-                # 8. 计算GIoU损失
+                # 8. 计算GIoU损失（对抗损失，直接用GIoU而非1-GIoU）
                 giou = generalized_box_iou(matched_pred_box, current_gt_box)  # [1]
-                giou_loss = (1 - giou).sum()
+                giou_loss = giou.sum()
                 total_giou_loss += giou_loss
 
         # 计算平均损失（除以总真实框数量）
-
         if total_gt_count > 0:
             class_loss_avg = total_class_loss / total_gt_count
             bbox_l1_loss_avg = total_bbox_l1_loss / total_gt_count
             giou_loss_avg = total_giou_loss / total_gt_count
+        else:
+            # 无GT时的兜底（避免除0）
+            class_loss_avg = torch.tensor(0.0, device=device)
+            bbox_l1_loss_avg = torch.tensor(0.0, device=device)
+            giou_loss_avg = torch.tensor(0.0, device=device)
 
         # 总损失 = 加权和
         total_loss = (
@@ -542,8 +665,6 @@ class YOLOv11DetectionLoss(nn.Module):
         }
 
         return total_loss, loss_dict
-    
-
 
 class TVLoss(nn.Module):
     """
@@ -586,9 +707,93 @@ class TVLoss(nn.Module):
     
 
 
+class MaskedL1L2Loss(nn.Module):
+    def __init__(self, loss_type: str = "l2", reduction: str = "mean"):
+        """
+        带掩码的 L1/L2 损失函数（支持 NumPy 掩码输入）
+        :param loss_type: 损失类型，可选 "l1"（MAE）或 "l2"（MSE）
+        :param reduction: 损失聚合方式，可选 "mean"（均值）、"sum"（求和）、"none"（逐元素）
+        """
+        super(MaskedL1L2Loss, self).__init__()
+        if loss_type not in ["l1", "l2"]:
+            raise ValueError(f"loss_type 必须是 'l1' 或 'l2'，当前为 {loss_type}")
+        if reduction not in ["mean", "sum", "none"]:
+            raise ValueError(f"reduction 必须是 'mean'/'sum'/'none'，当前为 {reduction}")
+        
+        self.loss_type = loss_type
+        self.reduction = reduction
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask) -> torch.Tensor:
+        """
+        前向传播：计算掩码区域内的 L1/L2 损失
+        :param pred: 预测值张量，形状为 [B, C, H, W] 或 [B, H, W]（批量大小 + 特征维度）
+        :param target: 真实值张量，形状需与 pred 一致
+        :param mask: 掩码（NumPy 数组/张量），shape=(B, H, W)，支持布尔型/0-1数值型
+        :return: 掩码区域内的损失值
+        """
+        # 1. 校验预测值与真实值形状匹配
+        if pred.shape != target.shape:
+            raise RuntimeError(f"预测值形状 {pred.shape} 与真实值形状 {target.shape} 不匹配")
+        
+        # 2. 处理掩码：NumPy 转张量 + 布尔型转数值型 + 扩展维度（适配通道）
+        mask_tensor = self._process_mask(mask, pred)
+
+        # 3. 计算逐元素的 L1 或 L2 误差
+        if self.loss_type == "l1":
+            element_wise_loss = F.l1_loss(pred, target, reduction="none")  # L1 误差（MAE）
+        else:  # l2
+            element_wise_loss = F.mse_loss(pred, target, reduction="none")  # L2 误差（MSE）
+
+        # 4. 应用掩码：仅保留掩码为 1 的区域的误差
+        masked_loss = element_wise_loss * mask_tensor
+
+        # 5. 根据聚合方式计算最终损失
+        if self.reduction == "none":
+            return masked_loss  # 返回逐元素的掩码损失
+        elif self.reduction == "sum":
+            return masked_loss.sum()  # 掩码区域内的误差总和
+        else:  # mean
+            # 均值：有效误差之和 / 掩码中 1 的数量（避免除以 0）
+            mask_sum = mask_tensor.sum()
+            if mask_sum == 0:
+                return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+            return masked_loss.sum() / mask_sum
+
+    def _process_mask(self, mask, pred: torch.Tensor) -> torch.Tensor:
+        """
+        处理掩码：NumPy 转张量 + 布尔型转数值型 + 扩展通道维度
+        :param mask: 输入掩码（NumPy 数组/张量）
+        :param pred: 预测值张量（用于匹配设备、数据类型、形状）
+        :return: 处理后的掩码张量，形状与 pred 一致
+        """
+        # Step 1: NumPy 数组转 PyTorch 张量
+        if isinstance(mask, np.ndarray):
+            # 布尔型 NumPy 数组自动转为 0/1 浮点型
+            mask_tensor = torch.from_numpy(mask.astype(np.float32))
+        elif isinstance(mask, torch.Tensor):
+            mask_tensor = mask.float()  # 张量转为浮点型（布尔型张量会自动转 0/1）
+        else:
+            raise TypeError(f"掩码类型 {type(mask)} 不支持，仅支持 NumPy 数组或 PyTorch 张量")
+        
+        # Step 2: 匹配设备和数据类型
+        mask_tensor = mask_tensor.to(device=pred.device, dtype=pred.dtype)
+        
+        # Step 3: 扩展通道维度（若 pred 有通道维度 [B, C, H, W]，mask 是 [B, H, W]）
+        if len(pred.shape) == 4 and len(mask_tensor.shape) == 3:
+            # 从 [B, H, W] 扩展为 [B, 1, H, W]，适配通道维度广播
+            mask_tensor = mask_tensor.unsqueeze(1)
+        
+        # Step 4: 校验形状兼容性
+        if not torch.broadcast_shapes(pred.shape, mask_tensor.shape) == pred.shape:
+            raise RuntimeError(
+                f"掩码形状 {mask_tensor.shape} 与预测值形状 {pred.shape} 不兼容！\n"
+                f"掩码输入形状：{np.shape(mask)}（原始）→ {mask_tensor.shape}（处理后）"
+            )
+        
+        return mask_tensor
 
 
-def tensor2picture(tensor, save_path, data_range="auto", use_opencv=False):
+def tensor2picture(tensor, save_path, norm_status=False, use_opencv=False):
     """
     将 Tensor 保存为图像文件
     
@@ -606,6 +811,8 @@ def tensor2picture(tensor, save_path, data_range="auto", use_opencv=False):
         use_opencv: bool, 可选
             是否用 OpenCV 保存（默认用 PIL），OpenCV 会自动转换 RGB→BGR
     """
+    if tensor.dtype == torch.bfloat16:
+        tensor = tensor.to(torch.float32)
     # --------------------------
     # 1. 处理 Tensor 维度（移除批量维度）
     # --------------------------
@@ -642,19 +849,22 @@ def tensor2picture(tensor, save_path, data_range="auto", use_opencv=False):
     # --------------------------
     # 3. 数据范围映射到 [0, 255]
     # --------------------------
-    if data_range == "auto":
-        min_val = img_np.min()
-        max_val = img_np.max()
-    else:
-        min_val, max_val = data_range
-    
-    # 防止除零（若所有值相同）
-    if max_val == min_val:
-        img_np = np.zeros_like(img_np, dtype=np.uint8)
-    else:
-        # 归一化到 [0, 1] 再映射到 [0, 255]
-        img_np = ((img_np - min_val) / (max_val - min_val) * 255).astype(np.uint8)
-    
+
+    min_val = img_np.min()
+    max_val = img_np.max()
+
+    if norm_status:
+        # 防止除零（若所有值相同）
+        if max_val == min_val:
+            img_np = np.zeros_like(img_np, dtype=np.uint8)
+        else:
+            # 归一化到 [0, 1] 再映射到 [0, 255]
+            img_np = ((img_np - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+    else :
+        img_np=(img_np*255).astype(np.uint8)
+        # 超过0-255的像素值，截取、
+        img_np[img_np>255]=255
+    # 
     # --------------------------
     # 4. 保存图像
     # --------------------------
@@ -897,7 +1107,265 @@ class CustomImageDataset(Dataset):
         
         # 返回：图片张量 + 图片路径（用于后续记录）
         return img, img_path
+
+
+
+
+
+
+class CustomFolderDataset(Dataset):
+    def __init__(self, root_dir, transform=None, 
+                 target_image_name_list=[],
+                 img_extensions=['.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.PNG', '.JPEG','pt']):
+        """
+        自定义数据集：按文件夹分组加载图片（递归查找子文件夹）
+        :param root_dir: 根目录（子文件夹为不同的分组）
+        :param transform: 单张图片的预处理变换
+        :param img_extensions: 支持的图片格式
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.img_extensions = img_extensions
+        # 按文件夹分组存储数据：每个元素为 (文件夹名称, 该文件夹下所有图片路径列表)
+        self.folder_data = self._get_folder_img_paths()
+        self.target_image_name_list = target_image_name_list
+        if len(target_image_name_list)<=0:
+            # 报错
+            raise ValueError(f"请指定目标图片名称列表！")
+
+    def _get_folder_img_paths(self):
+        """递归遍历目录，按文件夹分组获取图片路径"""
+        folder_dict = {}  # key: 文件夹路径, value: 该文件夹下的图片路径列表
+        
+        # 递归遍历所有子目录
+        for root, dirs, files in os.walk(self.root_dir):
+            # 过滤当前文件夹下的图片
+            img_paths = []
+            for file in files:
+                if any(file.endswith(ext) for ext in self.img_extensions):
+                    img_paths.append(os.path.join(root, file))
+            # 仅保留包含图片的文件夹
+            if img_paths:
+                # 用文件夹的相对路径作为名称（也可用basename）
+                folder_name = os.path.relpath(root, self.root_dir)
+                #
+                
+                folder_dict[folder_name] = img_paths
+        
+        if not folder_dict:
+            raise ValueError(f"目录 {self.root_dir} 下未找到包含图片的文件夹！")
+        
+        # 转换为列表，便于按索引访问：[(folder_name, img_paths), ...]
+        folder_data = [(name, paths) for name, paths in folder_dict.items()]
+        return folder_data
+
+    def __len__(self):
+        """返回文件夹的总数（而非图片总数）"""
+        return len(self.folder_data)
+
+    def __getitem__(self, idx):
+        """
+        按索引返回单个文件夹的所有图片数据
+        :param idx: 文件夹索引
+        :return: 
+            folder_name: 文件夹名称（str）
+            img_tensors: 该文件夹下所有图片的张量列表 (list[torch.Tensor])
+            img_names: 该文件夹下所有图片的名称列表 (list[str])
+        """
+        # 获取当前文件夹的名称和图片路径
+        folder_name, img_paths = self.folder_data[idx]
+        
+        img_tensors = []  # 存储该文件夹下所有图片的张量
+        img_names = []    # 存储该文件夹下所有图片的名称（不含路径）
+        
+        for img_path in img_paths:
+            image_name_1=os.path.basename(img_path)
+                # 去除后缀
+            image_name=image_name_1.split('.')[0]
+            if image_name_1 in self.target_image_name_list:
+                # 根据后缀，读取文件，如果是pt文件，则加载为张量
+
+                try:
+                    if img_path.endswith('.pt'):
+                        img = torch.load(img_path)
+                    else:    
+                        # 读取图片并转为RGB
+                        img = Image.open(img_path).convert('RGB')
+                        # 应用预处理变换
+                        if self.transform:
+                            img = self.transform(img)
+                except Exception as e:
+                    raise RuntimeError(f"加载图片失败 {img_path}：{e}")
+                
+
+                
+                # 收集张量和图片名称
+                img_tensors.append(img)
+
+                img_names.append(os.path.basename(image_name_1))  # 仅保留图片文件名，去除后缀
+                # img_names.append(os.path.basename(img_path))
+            else:
+                continue
+        
+        return folder_name, img_tensors, img_names
+
+    def get_folder_by_name(self, folder_name):
+        """按文件夹名称查找并返回该文件夹的图片数据（非索引方式）"""
+        for idx, (name, paths) in enumerate(self.folder_data):
+            if name == folder_name:
+                return self.__getitem__(idx)
+        raise ValueError(f"未找到文件夹：{folder_name}")
+
+
+
+# class CustomFolderDataset(Dataset):
+#     def __init__(self, root_dir, transform=None, 
+#                  target_image_name_list=[],
+#                  img_extensions=['.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.PNG', '.JPEG','pt']):
+#         """
+#         自定义数据集：按文件夹分组加载图片（递归查找子文件夹）
+#         :param root_dir: 根目录（子文件夹为不同的分组）
+#         :param transform: 单张图片的预处理变换
+#         :param target_image_name_list: 目标图片名称列表（需匹配的文件名）
+#         :param img_extensions: 支持的图片格式
+#         """
+#         self.root_dir = root_dir
+#         self.transform = transform
+#         self.img_extensions = img_extensions
+#         self.target_image_name_list = [name.strip() for name in target_image_name_list]  # 去除空格
+        
+#         if len(self.target_image_name_list) <= 0:
+#             raise ValueError(f"请指定目标图片名称列表！")
+        
+#         # 按文件夹分组存储数据：每个元素为 (文件夹名称, 该文件夹下所有图片路径列表)
+#         self.folder_data = self._get_folder_img_paths()
+#         # 过滤：仅保留可能包含目标图片的文件夹（提前筛除空文件夹）
+#         self.folder_data = self._filter_valid_folders()
+
+#     def _get_folder_img_paths(self):
+#         """递归遍历目录，按文件夹分组获取图片路径"""
+#         folder_dict = {}  # key: 文件夹路径, value: 该文件夹下的图片路径列表
+        
+#         # 递归遍历所有子目录
+#         for root, dirs, files in os.walk(self.root_dir):
+#             # 过滤当前文件夹下的图片
+#             img_paths = []
+#             for file in files:
+#                 if any(file.endswith(ext) for ext in self.img_extensions):
+#                     img_paths.append(os.path.join(root, file))
+#             # 仅保留包含图片的文件夹
+#             if img_paths:
+#                 folder_name = os.path.relpath(root, self.root_dir)
+#                 folder_dict[folder_name] = img_paths
+        
+#         if not folder_dict:
+#             raise ValueError(f"目录 {self.root_dir} 下未找到包含图片的文件夹！")
+        
+#         # 转换为列表，便于按索引访问：[(folder_name, img_paths), ...]
+#         folder_data = [(name, paths) for name, paths in folder_dict.items()]
+#         return folder_data
+
+#     def _filter_valid_folders(self):
+#         """提前过滤：仅保留包含目标图片的文件夹，减少后续空样本"""
+#         valid_folders = []
+#         for folder_name, img_paths in self.folder_data:
+#             # 检查该文件夹是否有目标图片
+#             has_target = any(
+#                 os.path.basename(path) in self.target_image_name_list 
+#                 for path in img_paths
+#             )
+#             if has_target:
+#                 valid_folders.append((folder_name, img_paths))
+#         return valid_folders
+
+#     def __len__(self):
+#         """返回有效文件夹的总数（仅包含目标图片的文件夹）"""
+#         return len(self.folder_data)
+
+#     def __getitem__(self, idx):
+#         """
+#         按索引返回单个文件夹的所有匹配图片数据
+#         若无匹配图片，返回 (None, [], []) 便于后续过滤
+#         :param idx: 文件夹索引
+#         :return: 
+#             folder_name: 文件夹名称（str/None）
+#             img_tensors: 匹配图片的张量列表 (list[torch.Tensor])
+#             img_names: 匹配图片的名称列表 (list[str])
+#         """
+#         # 边界检查
+#         if idx < 0 or idx >= len(self.folder_data):
+#             return None, [], []
+        
+#         # 获取当前文件夹的名称和图片路径
+#         folder_name, img_paths = self.folder_data[idx]
+        
+#         img_tensors = []  # 存储该文件夹下匹配的图片张量
+#         img_names = []    # 存储该文件夹下匹配的图片名称
+        
+#         for img_path in img_paths:
+#             img_basename = os.path.basename(img_path)
+#             # 检查是否是目标图片
+#             if img_basename not in self.target_image_name_list:
+#                 continue  # 跳过非目标图片
+            
+#             try:
+#                 # 加载pt文件或图片
+#                 if img_path.endswith('.pt'):
+#                     img = torch.load(img_path, map_location='cpu')  # 避免GPU占用
+#                 else:    
+#                     # 读取图片并转为RGB
+#                     with Image.open(img_path) as img_file:
+#                         img = img_file.convert('RGB')
+#                         # 应用预处理变换
+#                         if self.transform:
+#                             img = self.transform(img)
+#             except Exception as e:
+#                 print(f"警告：加载图片失败 {img_path}，已跳过：{e}")
+#                 continue  # 跳过加载失败的图片
+            
+#             # 收集有效数据
+#             img_tensors.append(img)
+#             img_names.append(img_basename)
+        
+#         # 若无匹配图片，返回None标识
+#         if len(img_tensors) == 0:
+#             return None, [], []
+        
+#         return folder_name, img_tensors, img_names
+
+#     def get_folder_by_name(self, folder_name):
+#         """按文件夹名称查找并返回该文件夹的图片数据（非索引方式）"""
+#         for idx, (name, paths) in enumerate(self.folder_data):
+#             if name == folder_name:
+#                 return self.__getitem__(idx)
+#         print(f"警告：未找到文件夹 {folder_name}，返回空数据")
+#         return None, [], []
+
+# # -------------------------- 关键：自定义Collate_fn 过滤空样本 --------------------------
+# def custom_collate_fn(batch):
+#     """
+#     过滤空样本，避免DataLoader拼接报错
+#     :param batch: 列表，每个元素为 (folder_name, img_tensors, img_names)
+#     :return: 过滤后的有效数据
+#     """
+#     # 过滤空样本（folder_name为None的样本）
+#     valid_batch = [item for item in batch if item[0] is not None and len(item[1]) > 0]
     
+#     # 若无有效样本，返回空列表
+#     if len(valid_batch) == 0:
+#         return [], [], []
+    
+#     # 拆分有效样本
+#     folder_names = [item[0] for item in valid_batch]
+#     img_tensors = [tensor for item in valid_batch for tensor in item[1]]  # 展平张量列表
+#     img_names = [name for item in valid_batch for name in item[2]]      # 展平名称列表
+    
+#     return folder_names, img_tensors, img_names
+
+
+
+
+
 class ResizeMaxEdge:
     def __init__(self, max_edge_size):
         self.max_edge_size = max_edge_size
@@ -1347,7 +1815,15 @@ def get_mask_min_rect_size(mask: np.ndarray) :
         rect_size_list.append([rect_h, rect_w])
     
     return rect_size_list
-def canny_with_mask_invert(background_imag, masks=None, canny_low=50, canny_high=240,blur_status=True):
+def canny_with_mask_invert(background_imag,
+                                masks=None,
+                                canny_low=50, 
+                                canny_high=240,
+                                blur_status=True,
+                                blur_k_size=5,
+                                with_mask_edge=True,
+                                with_content_canny=True,
+                                ):
     
     """
     对 tensor 图像计算 Canny 边缘，mask 以外区域置 0，同时添加 mask 自身的边界边缘；
@@ -1388,29 +1864,39 @@ def canny_with_mask_invert(background_imag, masks=None, canny_low=50, canny_high
         selected_mask = (mask_i.astype(np.uint8) * 255)  # (H, W)，True→255，False→0
 
         # ===== 步骤3：提取 mask 自身的边界边缘 =====
-        # 用轮廓检测提取 mask 边界
-        contours, _ = cv2.findContours(
-            selected_mask, 
-            cv2.RETR_EXTERNAL,  # 只提取最外层轮廓
-            cv2.CHAIN_APPROX_SIMPLE  # 压缩轮廓点
-        )
         # 创建空画布绘制 mask 边界
         mask_edge = np.zeros_like(selected_mask)
-        cv2.drawContours(
-            mask_edge, 
-            contours, 
-            -1,  # 绘制所有轮廓
-            255,  # 轮廓颜色（白色）
-            1  # 轮廓线宽度（可根据需求调整，如1/3）
-        )  # mask_edge: 边界=255，其余=0
 
-        # ===== 步骤4：图像 Canny 边缘检测 =====
-        # 对图像进行模糊处理
+
         if blur_status:
-            img_np = cv2.GaussianBlur(img_np, (5, 5), 0)
+            img_np = cv2.GaussianBlur(img_np, (blur_k_size, blur_k_size), 0)
 
         gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        canny_edges = cv2.Canny(gray_img, canny_low, canny_high)  # 图像边缘=255，背景=0
+        
+        # ===== 步骤4：图像 Canny 边缘检测 =====
+        if with_content_canny:
+            # 对图像进行模糊处理
+
+            canny_edges = cv2.Canny(gray_img, canny_low, canny_high)  # 图像边缘=255，背景=0
+        else :
+            canny_edges = np.zeros_like(selected_mask)
+
+        if with_mask_edge:
+            # 用轮廓检测提取 mask 边界
+            
+            contours, _ = cv2.findContours(
+                gray_img, # selected_mask
+                cv2.RETR_EXTERNAL,  # 只提取最外层轮廓
+                cv2.CHAIN_APPROX_SIMPLE  # 压缩轮廓点
+            )
+
+            cv2.drawContours(
+                mask_edge, 
+                contours, 
+                -1,  # 绘制所有轮廓
+                255,  # 轮廓颜色（白色）
+                1  # 轮廓线宽度（可根据需求调整，如1/3）
+            )  # mask_edge: 边界=255，其余=0
 
         # ===== 步骤5：融合「图像边缘」和「mask 边界」=====
         # 按位或：只要有一个边缘（图像/mask）就保留
@@ -1811,3 +2297,610 @@ def paste_images_to_background_no_scale(
     return composite_bg
 
 
+
+def load_yaml_config(config_path: str) -> Dict:
+    """
+    加载YAML配置文件
+    
+    参数:
+        config_path: YAML配置文件路径
+    
+    返回:
+        解析后的配置字典
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"配置文件不存在: {config_path}")
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    
+    return config
+
+
+
+
+def modify_labels_and_scores(results_dict: dict, ref_label1: int, ref_label2: int = 0) -> dict:
+    """
+    根据目标标签与参考标签1的关系替换标签，并同步更新scores_vector：
+    - 若目标标签≠ref_label1：将标签替换为ref_label1，对应概率向量的ref_label1位置设为1，其余为0
+    - 若目标标签=ref_label1：将标签替换为ref_label2，对应概率向量的ref_label2位置设为1，其余为0
+    
+    Args:
+        results_dict (dict): 输入字典，需包含'labels'和'scores_vector'键：
+                            - 'labels': list of tensor，每个tensor为[目标数]的标签索引
+                            - 'scores_vector': list of tensor，每个tensor为[目标数, 类别数]的概率向量
+        ref_label1 (int): 第一参考标签（判断基准，必须是整数类别索引）
+        ref_label2 (int, optional): 第二参考标签，默认为0
+    
+    Returns:
+        dict: 修改后的新字典，其他键保持不变，'labels'和'scores_vector'被更新
+    
+    Raises:
+        KeyError: 输入字典缺少'labels'或'scores_vector'键
+        TypeError: 参考标签不是整数，或labels/scores_vector格式不符合要求
+        IndexError: 参考标签超出scores_vector的类别索引范围
+    """
+    # 1. 检查输入字典的必要键
+    required_keys = ['labels', 'scores_vector']
+    for key in required_keys:
+        if key not in results_dict:
+            raise KeyError(f"输入字典必须包含'{key}'键")
+    
+    # 2. 检查参考标签类型
+    if not isinstance(ref_label1, int):
+        raise TypeError(f"第一参考标签必须是整数类别索引，当前类型：{type(ref_label1)}")
+    if not isinstance(ref_label2, int):
+        raise TypeError(f"第二参考标签必须是整数类别索引，当前类型：{type(ref_label2)}")
+    
+    # 3. 深拷贝原字典，避免修改原数据
+    new_results = copy.deepcopy(results_dict)
+    original_labels = new_results['labels']
+    original_scores_vector = new_results['scores_vector']
+    
+    # 4. 检查labels和scores_vector的批次数量是否一致
+    if len(original_labels) != len(original_scores_vector):
+        raise ValueError(f"labels批次数量({len(original_labels)})与scores_vector批次数量({len(original_scores_vector)})不匹配")
+    
+    modified_labels = []
+    modified_scores_vector = []
+    
+    # 5. 逐批次处理labels和scores_vector
+    for batch_idx, (batch_labels, batch_scores) in enumerate(zip(original_labels, original_scores_vector)):
+        # 检查当前批次的张量格式
+        if not isinstance(batch_labels, torch.Tensor) or batch_labels.dim() != 1:
+            raise TypeError(f"批次{batch_idx}的labels必须是1维张量，当前形状：{batch_labels.shape}")
+        if not isinstance(batch_scores, torch.Tensor) or batch_scores.dim() != 2:
+            raise TypeError(f"批次{batch_idx}的scores_vector必须是2维张量([目标数, 类别数])，当前形状：{batch_scores.shape}")
+        
+        num_targets, num_classes = batch_scores.shape
+        # 检查两个参考标签是否在类别索引范围内
+        for label, label_name in [(ref_label1, '第一'), (ref_label2, '第二')]:
+            if label < 0 or label >= num_classes:
+                raise IndexError(f"批次{batch_idx}的类别数为{num_classes}，{label_name}参考标签{label}超出索引范围[0, {num_classes-1}]")
+        
+        # ---- 处理labels：根据与ref_label1的关系替换 ----
+        new_batch_labels = batch_labels.clone()
+        # 掩码1：标签等于ref_label1的目标
+        eq_ref1_mask = (new_batch_labels == ref_label1)
+        # 掩码2：标签不等于ref_label1的目标
+        ne_ref1_mask = ~eq_ref1_mask
+        
+        # 不等于ref_label1 → 替换为ref_label1
+        new_batch_labels[ne_ref1_mask] = ref_label1
+        # 等于ref_label1 → 替换为ref_label2
+        new_batch_labels[eq_ref1_mask] = ref_label2
+        modified_labels.append(new_batch_labels)
+        
+        # ---- 处理scores_vector：同步更新概率向量 ----
+        new_batch_scores = torch.zeros_like(batch_scores)  # 先初始化全0
+        # 不等于ref_label1的目标：ref_label1位置设为1
+        new_batch_scores[ne_ref1_mask, ref_label1] = 1.0
+        # 等于ref_label1的目标：ref_label2位置设为1
+        new_batch_scores[eq_ref1_mask, ref_label2] = 1.0
+        
+        modified_scores_vector.append(new_batch_scores)
+    
+    # 6. 更新新字典的labels和scores_vector
+    new_results['labels'] = modified_labels
+    new_results['scores_vector'] = modified_scores_vector
+    
+    return new_results
+
+
+
+def filter_max_box_per_batch(result: dict,class_names) -> dict:
+    """
+    筛选每个batch中面积最大的检测框，返回与输入格式一致的result_gt字典
+    
+    Args:
+        result_gt: 原始gt字典，包含以下key（值均为列表，每个元素对应一个batch的Tensor）:
+            - labels: 列表，每个元素是 [N,] Tensor（N为该batch的框数量，存储类别标签）
+            - boxes: 列表，每个元素是 [N, 4] Tensor（框坐标，格式支持 xyxy/xywh）
+            - scores: 列表，每个元素是 [N,] Tensor（置信度分数）
+            - scores_vector: 列表，每个元素是 [N, D] Tensor（D为分数向量维度）
+    
+    Returns:
+        filtered_gt: 筛选后的字典，结构与输入一致，每个batch仅保留面积最大的框
+                    若某batch无框（Tensor为空），则保留空Tensor
+                    
+    注意：
+        - boxes坐标格式支持 xyxy（左上x, 左上y, 右下x, 右下y）或 xywh（左上x, 左上y, 宽, 高）
+        - 自动适配Tensor设备（CPU/GPU），保持与输入一致
+    """
+    # 初始化输出字典，与输入格式对齐
+    filtered_gt = {
+        'labels': [],
+        'boxes': [],
+        'scores': [],
+        'scores_vector': []
+    }
+    filtered_class_names = []
+    # 遍历每个batch的信息（按列表索引对齐）
+    batch_num = len(result['labels'])
+    for b_idx in range(batch_num):
+        # 取出当前batch的所有数据（处理空值，避免索引报错）
+        labels = result['labels'][b_idx] if b_idx < len(result['labels']) else torch.tensor([], dtype=torch.int64)
+        boxes = result['boxes'][b_idx] if b_idx < len(result['boxes']) else torch.tensor([], dtype=torch.float32)
+        scores = result['scores'][b_idx] if b_idx < len(result['scores']) else torch.tensor([], dtype=torch.float32)
+        scores_vector = result['scores_vector'][b_idx] if b_idx < len(result['scores_vector']) else torch.tensor([], dtype=torch.float32)
+        class_name_temp=class_names[b_idx] if b_idx < len(class_names) else ''
+
+        # 处理空框场景：当前batch无检测框，直接添加空Tensor
+        if boxes.numel() == 0:
+            filtered_gt['labels'].append(labels)
+            filtered_gt['boxes'].append(boxes)
+            filtered_gt['scores'].append(scores)
+            filtered_gt['scores_vector'].append(scores_vector)
+            filtered_class_names.append(class_name_temp)
+            continue
+        
+        # ========== 核心：计算每个框的面积，筛选最大面积的框 ==========
+        # 统一转换为 xyxy 格式计算面积（兼容xyxy/xywh输入）
+        if boxes.shape[1] == 4:
+            # 区分 xyxy 和 xywh：xyxy的宽高为 (x2-x1, y2-y1)；xywh的宽高为 (w, h)
+            if (boxes[:, 2] > boxes[:, 0]).all() and (boxes[:, 3] > boxes[:, 1]).all():
+                # 判定为 xyxy 格式（x2>x1, y2>y1）
+                w = boxes[:, 2] - boxes[:, 0]
+                h = boxes[:, 3] - boxes[:, 1]
+            else:
+                # 判定为 xywh 格式
+                w = boxes[:, 2]
+                h = boxes[:, 3]
+            area = w * h  # 计算每个框的面积 [N,]
+        else:
+            raise ValueError(f"boxes维度错误，需为 [N,4]，当前为 {boxes.shape}")
+        
+        # 找到最大面积的索引（若多个框面积相同，取第一个）
+        max_area_idx = torch.argmax(area)
+        
+        # 筛选该索引对应的框、标签、分数
+        filtered_labels = labels[max_area_idx:max_area_idx+1]  # 保留维度 [1,]
+        filtered_boxes = boxes[max_area_idx:max_area_idx+1]    # 保留维度 [1,4]
+        filtered_scores = scores[max_area_idx:max_area_idx+1]  # 保留维度 [1,]
+        filtered_scores_vector = scores_vector[max_area_idx:max_area_idx+1]  # 保留维度 [1,D]
+        filtered_class_names.append(class_name_temp[max_area_idx])
+        # 将筛选结果添加到输出字典
+        filtered_gt['labels'].append(filtered_labels)
+        filtered_gt['boxes'].append(filtered_boxes)
+        filtered_gt['scores'].append(filtered_scores)
+        filtered_gt['scores_vector'].append(filtered_scores_vector)
+    
+    return filtered_gt,filtered_class_names
+
+
+
+
+
+def yolo_boxes_to_corners(boxes):
+    """
+    将多batch YOLO检测框转换为中心点坐标列表
+    
+    参数：
+        boxes: 检测框输入，支持两种格式：
+                - 多batch列表：List[torch.Tensor]，每个元素形状为 (N, 4)（xyxy格式），对应一个batch的检测框
+                - 单batch张量：torch.Tensor，形状为 (N, 4)（xyxy格式）
+        img_shape: 图像尺寸 (height, width)，若需归一化坐标转绝对坐标则传入
+    
+    返回：
+        corners_list: 嵌套列表，外层长度=batch数，内层每个元素为 [x_center, y_center]
+    """
+    # 统一输入格式为多batch列表
+    if isinstance(boxes, torch.Tensor):
+        boxes = [boxes]  # 单batch转为列表
+    
+    corners_list = []
+    # 遍历每个batch
+    for batch_idx, batch_boxes in enumerate(boxes):
+        batch_corners = []
+        if batch_boxes.numel() == 0:  # 当前batch无检测框
+            corners_list.append(batch_corners)
+            continue
+        
+        # 维度校验
+        if batch_boxes.ndim != 2 or batch_boxes.shape[1] != 4:
+            raise ValueError(f"Batch {batch_idx} 检测框形状错误，期望 (N, 4)，实际 {batch_boxes.shape}")
+        
+        # 转换为numpy（也可保留张量计算）
+        batch_boxes_np = batch_boxes.detach().cpu().numpy()
+        
+        # 计算每个框的中心点
+        for box in batch_boxes_np:
+            x1, y1, x2, y2 = box
+            x_center = (x1 + x2) / 2
+            y_center = (y1 + y2) / 2
+            
+
+            
+            # 可选：转为整数
+            x_center, y_center = map(int, [x_center, y_center])
+            batch_corners.append([x_center, y_center])
+        
+        corners_list.append(batch_corners)
+    
+    return corners_list
+
+
+
+                  
+def extract_mask_content( input_tensor, mask, mask_value=1.0):
+    """
+    从输入 tensor 中抠出 mask 内的内容，mask 外区域设为指定值（默认为 1.0）
+    
+    参数：
+        input_tensor: 输入图像 tensor（格式：BCHW 或 CHW，值范围 0-1）
+        mask: 二维掩码 array 或 tensor（格式：(H, W)，元素为 True/False，True 表示保留区域）
+        mask_value: mask 外区域的填充值（默认 1.0）
+    
+    返回：
+        result_tensor: 处理后的 tensor，mask 内保留原图内容，mask 外为 mask_value
+    """
+    # 记录原始输入维度，用于最终格式恢复
+    original_dim = input_tensor.dim()
+    
+    # 1. 统一输入 tensor 为 BCHW 格式（确保有 batch 维度）
+    if original_dim == 3:  # CHW → BCHW
+        input_tensor = input_tensor.unsqueeze(0)
+    B, C, H, W = input_tensor.shape  # 此时 input_tensor 一定是 BCHW
+    result_list=[]
+    for i in range(B):  # 批量处理
+
+        mask_b=mask[i]
+        input_tensor_b=input_tensor[i]
+        # 2. 处理二维 mask，转为 tensor 并扩展维度以匹配 BCHW
+        if isinstance(mask_b, np.ndarray):
+            mask_b = torch.from_numpy(mask_b).bool()  # numpy 转 bool tensor
+        else:
+            mask_b = mask_b.bool()  # 确保是 bool 类型
+        
+        # 扩展 mask 维度：(H, W) → (1, 1, H, W)，再通过广播匹配 (B, C, H, W)
+        mask_b = mask_b.unsqueeze(0).unsqueeze(0)  # 增加 batch 和 channel 维度
+        mask_b = mask_b.to(input_tensor_b.device)  # 确保与输入 tensor 同设备
+        
+        # 3. 生成填充值 tensor（与输入同形状）
+        fill_tensor = torch.full_like(input_tensor_b, fill_value=mask_value)
+        
+        # 4. 核心操作：mask 内保留原图，mask 外填充
+        result_tensor = torch.where(mask_b, input_tensor_b, fill_tensor)
+        
+        result_list.append(result_tensor)
+    result_tensor_all=torch.cat(result_list)
+    return result_tensor_all
+
+
+
+def pad_to_square(img_tensor, pad_mode="constant", fill_value=0.0):
+    """
+    将输入的图像 tensor 填充为正方形（宽高相等，且为原始最大边长）
+    
+    参数：
+        img_tensor: 输入图像 tensor，形状为 (C, H, W) 或 (B, C, H, W)
+        pad_mode: 填充模式，同 F.pad 的 mode 参数（如 "constant", "edge", "reflect" 等）
+        fill_value: 填充值（当 pad_mode 为 "constant" 时有效）
+    
+    返回：
+        padded_tensor: 填充后的正方形 tensor，形状为 (C, max_dim, max_dim) 或 (B, C, max_dim, max_dim)
+    """
+    # 处理单张图像（C, H, W）或批量图像（B, C, H, W）
+    if img_tensor.ndim == 3:
+        C, H, W = img_tensor.shape
+        batch_mode = False
+    elif img_tensor.ndim == 4:
+        B, C, H, W = img_tensor.shape
+        batch_mode = True
+    else:
+        raise ValueError(f"输入 tensor 维度必须是 3 (C, H, W) 或 4 (B, C, H, W)，但得到 {img_tensor.ndim}")
+    
+    max_dim = max(H, W)
+    
+    # 计算填充量：(上, 下, 左, 右)
+    # 上下填充总和 = max_dim - H；左右填充总和 = max_dim - W
+    pad_top = (max_dim - H) // 2
+    pad_bottom = max_dim - H - pad_top  # 确保上下填充总和正确（处理奇数情况）
+    pad_left = (max_dim - W) // 2
+    pad_right = max_dim - W - pad_left  # 确保左右填充总和正确
+    
+    # 构造填充参数（注意：pad 的顺序是 (左, 右, 上, 下) 对于最后两个维度）
+    pad = (pad_left, pad_right, pad_top, pad_bottom)
+    
+    # 执行填充
+    if batch_mode:
+        # 批量图像：在 H 和 W 维度填充（即最后两个维度）
+        padded_tensor = F.pad(img_tensor, pad, mode=pad_mode, value=fill_value)
+    else:
+        # 单张图像：同样在 H 和 W 维度填充
+        padded_tensor = F.pad(img_tensor, pad, mode=pad_mode, value=fill_value)
+    
+    return padded_tensor
+
+
+
+
+def batched_tensor_mask_overlay(background_tensor, image_tensor, mask_array):
+    """
+    批量处理四维张量的mask覆盖操作，同时保证梯度传导
+    
+    参数:
+    background_tensor: 背景张量，形状为[B, C, H, W]
+    image_tensor: 前景张量，形状为[B, C, H, W]，需与背景张量尺寸匹配
+    mask_array: 布尔数组，形状为[B, H, W]或[H, W]，True表示需要覆盖的区域
+    
+    返回:
+    result_tensor: 合成后的张量，形状为[B, C, H, W]，保留梯度信息
+    """
+    # 确保device一致
+    on_device=image_tensor.device
+    background_tensor=background_tensor.to(on_device)
+
+    # 确保输入张量形状匹配
+    assert background_tensor.shape == image_tensor.shape, "背景和前景张量形状必须相同"
+
+    
+    # 处理mask形状，确保与输入张量匹配
+    if mask_array.ndim == 2:  # [H, W] - 对所有批次使用相同mask
+        mask_array = np.expand_dims(mask_array, axis=0)  # [1, H, W]
+    assert mask_array.shape == (background_tensor.shape[0], background_tensor.shape[2], background_tensor.shape[3]), \
+        f"mask形状应为[B, H, W]，实际为{mask_array.shape}"
+    
+    # 将mask数组转换为与输入张量匹配的形状 [B, C, H, W]
+    mask = mask_array.astype(np.float32)
+    mask = np.expand_dims(mask, axis=1)  # [B, 1, H, W]
+    mask = np.repeat(mask, background_tensor.shape[1], axis=1)  # [B, C, H, W]
+    
+    # 转换为张量并确保与输入在同一设备，同时保留梯度计算能力
+    mask_tensor = torch.from_numpy(mask).to(on_device, dtype=image_tensor.dtype)
+    
+    # 执行覆盖操作: 背景*(1-mask) + 前景*mask
+    # 所有操作均为PyTorch张量操作，会自动跟踪梯度
+    result_tensor = background_tensor * (1 - mask_tensor) + image_tensor * mask_tensor
+    
+    return result_tensor
+
+
+
+def match_detection_boxes(
+    result1: Dict[str, List[torch.Tensor]],
+    result2: Dict[str, List[torch.Tensor]],
+    iou_threshold: float = 0.0
+) -> Dict[str, Union[List, int, float, bool]]:
+    """
+    匹配两个检测结果的检测框，找到最匹配的框并统计类别是否相等
+    核心逻辑：通过IOU（交并比）匹配框，取IOU最大且≥阈值的框为匹配结果
+
+    Args:
+        result1: 第一个检测结果，结构为：
+            {
+                "boxes": 列表[B]，每个元素是[N1=1,4]的tensor（检测框坐标[x1,y1,x2,y2]）
+                "labels": 列表[B]，每个元素是[N1=1]的tensor（类别索引）
+                "scores": 列表[B]，每个元素是[N1=1]的tensor（置信度）
+                "scores_vector": 列表[B]，每个元素是[N1=1,C]的tensor（类别得分向量）
+            }
+        result2: 第二个检测结果，结构与result1一致，但N2可为任意值（≥0）
+        iou_threshold: IOU阈值，只有IOU≥该值的框才视为有效匹配，默认0.0（无过滤）
+
+    Returns:
+        Dict: 匹配结果统计，包含：
+            - batch_indices: List[int]，batch索引列表
+            - has_match: List[bool]，每个batch是否找到有效匹配框
+            - max_iou: List[float]，每个batch匹配框的最大IOU值
+            - matched_box_idx: List[Optional[int]]，result2中匹配框的索引（无匹配则为None）
+            - label1: List[int]，result1中每个batch的类别索引
+            - label2: List[Optional[int]]，result2中匹配框的类别索引（无匹配则为None）
+            - label_equal: List[bool]，类别是否相等（无匹配则为False）
+            - score1: List[float]，result1中每个batch的置信度
+            - score2: List[Optional[float]]，result2中匹配框的置信度（无匹配则为None）
+            - total_matched_batches: int，有有效匹配的batch总数
+            - correct_label_count: int，类别匹配正确的数量
+            - label_match_rate: float，类别匹配率（正确数/有效匹配数）
+    """
+    # -------------- 内部辅助函数：计算IOU --------------
+    def _calculate_iou(box1: torch.Tensor, box2: torch.Tensor) -> torch.Tensor:
+        """计算单个框与多个框的IOU，box1:[4], box2:[N,4]，返回[N]的IOU张量"""
+        if len(box2.shape) == 1:
+            box2 = box2.unsqueeze(0)
+        # 计算交集坐标
+        x1 = torch.max(box1[0], box2[:, 0])
+        y1 = torch.max(box1[1], box2[:, 1])
+        x2 = torch.min(box1[2], box2[:, 2])
+        y2 = torch.min(box1[3], box2[:, 3])
+        # 交集面积（无交集则为0）
+        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+        # 并集面积
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+        union = area1 + area2 - intersection
+        # 避免除零
+        union = torch.clamp(union, min=1e-6)
+        return intersection / union
+
+    # -------------- 输入校验 --------------
+    B = len(result1["boxes"])
+    for key in ["boxes", "labels", "scores", "scores_vector"]:
+        assert key in result1 and key in result2, f"检测结果缺少关键键值：{key}"
+        assert len(result2[key]) == B, f"两个检测结果的batch长度不一致（{key}）"
+        if key == "boxes":
+            # 校验result1的每个batch都是N=1
+            for b in range(B):
+                # 检测框数量不足，则跳过
+                if result1["boxes"][b].shape[0] < 1: continue
+                # assert result1["boxes"][b].shape[0] == 1, f"result1的batch {b} 检测框数量不是1"
+
+    # -------------- 初始化结果容器 --------------
+    match_results = {
+        "batch_indices": [], "has_match": [], "max_iou": [], "matched_box_idx": [],
+        "label1": [], "label2": [], "label_equal": [], "score1": [], "score2": []
+    }
+
+    # -------------- 逐Batch匹配 --------------
+    for b in range(B):
+        # 如果是空，则跳过
+        if result1["boxes"][b].shape[0] < 1: continue
+        # 获取result1当前batch的信息（N=1）
+        box1 = result1["boxes"][b].squeeze(0)  # [4]
+        label1 = result1["labels"][b].squeeze(0).item()
+        score1 = result1["scores"][b].squeeze(0).item()
+
+        # 获取result2当前batch的信息
+        boxes2 = result2["boxes"][b]  # [N2,4]
+        labels2 = result2["labels"][b]  # [N2]
+        scores2 = result2["scores"][b]  # [N2]
+        N2 = boxes2.shape[0] if boxes2.numel() > 0 else 0
+
+        # 初始化当前batch的结果
+        match_results["batch_indices"].append(b)
+        match_results["label1"].append(label1)
+        match_results["score1"].append(score1)
+
+        # 情况1：result2当前batch无检测框
+        if N2 == 0:
+            match_results["has_match"].append(False)
+            match_results["max_iou"].append(0.0)
+            match_results["matched_box_idx"].append(None)
+            match_results["label2"].append(None)
+            match_results["label_equal"].append(False)
+            match_results["score2"].append(None)
+            continue
+
+        # 情况2：计算IOU并找最大匹配
+        ious = _calculate_iou(box1, boxes2)  # [N2]
+        max_iou, matched_idx = torch.max(ious, dim=0)
+        max_iou = max_iou.item()
+        matched_idx = matched_idx.item()
+
+        # 过滤IOU阈值：若最大IOU < 阈值，视为无匹配
+        if max_iou < iou_threshold:
+            match_results["has_match"].append(False)
+            match_results["max_iou"].append(max_iou)
+            match_results["matched_box_idx"].append(None)
+            match_results["label2"].append(None)
+            match_results["label_equal"].append(False)
+            match_results["score2"].append(None)
+            continue
+
+        # 情况3：找到有效匹配框
+        label2 = labels2[matched_idx].item()
+        score2 = scores2[matched_idx].item()
+        label_equal = (label1 == label2)
+
+        # 保存结果
+        match_results["has_match"].append(True)
+        match_results["max_iou"].append(max_iou)
+        match_results["matched_box_idx"].append(matched_idx)
+        match_results["label2"].append(label2)
+        match_results["label_equal"].append(label_equal)
+        match_results["score2"].append(score2)
+
+    # -------------- 统计整体指标 --------------
+    total_matched = sum(match_results["has_match"])
+    correct_label = sum(match_results["label_equal"])
+    label_match_rate = correct_label / total_matched if total_matched > 0 else 0.0
+
+    match_results["total_matched_batches"] = total_matched
+    match_results["correct_label_count"] = correct_label
+    match_results["label_match_rate"] = label_match_rate
+
+    return match_results
+
+
+
+
+def tensor_01_to_int8_and_back(x: torch.Tensor) -> torch.Tensor:
+    """
+    模拟0-1 tensor的int8量化+还原，保证计算图完全不中断（无真实int8类型转换）
+    核心：用浮点类型模拟int8量化（数值上符合int8范围），避免整数类型截断梯度
+    """
+    # 保存原始类型和设备
+    orig_dtype = x.dtype
+    orig_device = x.device
+    
+    # 1. 固定缩放系数（0-1 → 0-255）
+    scale = torch.tensor(255.0, device=orig_device, dtype=orig_dtype, requires_grad=False)
+    
+    # 2. 确保输入严格在0-1范围（可微操作）
+    x_clamped = x.clamp(0.0, 1.0)
+    
+    # 3. 模拟int8量化（关键：全程保留浮点类型，不转真实int8）
+    x_scaled = x_clamped * scale  # 0-1 → 0-255（浮点）
+    x_scaled_rounded = torch.round(x_scaled)  # 四舍五入为整数（仍为浮点）
+    x_int8_sim = x_scaled_rounded.clamp(0.0, 255.0)  # 限制0-255（模拟int8范围，浮点类型）
+    
+    # 4. 还原为0-1范围（浮点操作，梯度可回传）
+    x_restored = x_int8_sim / scale  # 255 → 0-1
+    x_restored = x_restored.clamp(0.0, 1.0)  # 确保0-1范围
+    
+    # 保证设备/类型与输入完全一致
+    x_restored = x_restored.to(device=orig_device, dtype=orig_dtype)
+    
+    return x_restored
+
+
+
+
+def get_max_score_for_label(results: dict, ref_label: int) -> torch.Tensor:
+    """
+    找到与参考label匹配的最大score（全程张量操作，保留梯度，不转换类型）
+    
+    Args:
+        results: 检测结果字典，'labels'/'scores' 为张量列表（GPU/CPU均可）
+        ref_label: 参考标签（目标整数）
+    
+    Returns:
+        torch.Tensor: 匹配参考label的最大score张量（标量）；无匹配返回 0.0 标量张量（保留梯度图）
+    """
+    # 初始化最大score为0.0标量张量（与输入张量同设备、同dtype，保证梯度兼容）
+    max_score = None
+
+
+
+    # 遍历batch维度，全程张量操作
+    for batch_idx in range(len(results['labels'])):
+        label_tensor = results['labels'][batch_idx]  # 保留梯度的张量
+        score_tensor = results['scores'][batch_idx]  # 保留梯度的张量
+
+        # 1. 张量维度统一（兼容标量/一维张量）
+        label_flat = label_tensor.flatten()  # 展平为一维，不影响梯度
+        score_flat = score_tensor.flatten()  # 展平为一维，不影响梯度
+
+        # 2. 筛选匹配ref_label的label（张量比较，保留梯度）
+        # 生成匹配掩码：1表示匹配，0表示不匹配
+        match_mask = (label_flat == ref_label).float()
+        # 仅保留匹配项的score，不匹配项置0
+        matched_score = score_flat * match_mask
+
+        # 3. 取当前batch的最大匹配score（标量张量）
+        curr_max = matched_score.max()
+
+        # 4. 更新全局最大score（张量操作，保留梯度）
+        if max_score is None:
+            max_score = curr_max
+        else:
+            # 取两个张量的最大值（保留梯度）
+            max_score = torch.max(max_score, curr_max)
+
+    # 无匹配时返回0.0标量张量（开启梯度）
+    if max_score is None:
+        # 自动匹配输入张量的设备和dtype
+        device = results['scores'][0].device
+        dtype = results['scores'][0].dtype
+        max_score = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
+
+    return max_score
