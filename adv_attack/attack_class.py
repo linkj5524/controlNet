@@ -211,7 +211,7 @@ class ADV_ATTACK:
         # 加载检测模型
         object_detection_val=ObjectDetection(device=device,
                                               ** detect_params)
-        
+        detect_result_list={}
         for val_model_key in detect_params['val_model1'].keys():
             model_type_val=detect_params['val_model1'][val_model_key]["model_type"]
             model_path_val=detect_params['val_model1'][val_model_key]["model_path"]
@@ -222,17 +222,19 @@ class ADV_ATTACK:
                                         model_path=model_path_val
                                         )
             # 检测
-            image_name=model_type_val+input_file_name+'.jpg'
-            object_detection_val.detect_eval(images=input_image,
+            image_name=input_file_name+model_type_val+'.jpg'
+            temp_result,_=object_detection_val.detect_eval(images=input_image,
                                                 model_type=model_type_val,
                                                 file_path=input_path,
                                                 file_name=image_name)
             # 删除模型
             if    model_type_val in object_detection_val.models:                     
                     del object_detection_val.models[model_type_val]
+            detect_result_list[model_type_val]=temp_result
             
             # 清空内存
             torch.cuda.empty_cache()
+        return detect_result_list
             
         
 
@@ -1156,11 +1158,11 @@ class ADV_ATTACK:
         adv_init_tensor = move_to_gpu_and_cast_dtype(adv_init_tensor,optim_device,optim_data_type)
         adv_init_tensor_gt=adv_init_tensor.clone()
 
-        # 根据类型，修改result_gt,
-        if params["adv_loss_type"]==2:
-            target_label=params["target_class"]
-            other_label=params["target_class_ref"]
-            result_gt=modify_labels_and_scores(result_gt,target_label,other_label)
+        # # 根据类型，修改result_gt,
+        # if params["adv_loss_type"]==2:
+        #     target_label=params["target_class"]
+        #     other_label=params["target_class_ref"]
+        #     result_gt=modify_labels_and_scores(result_gt,target_label,other_label)
 
 
         result_gt=move_to_gpu_and_cast_dtype(result_gt,optim_device,optim_data_type)
@@ -1368,8 +1370,10 @@ class ADV_ATTACK:
                             weight_object=0.5,
                             threshold=0.5,
                             ref_class=None,
+                            negtive_class=None,
                             cam_target_class=None,
                             amp_status=False,
+
                             params=None):
         """
 
@@ -1439,13 +1443,16 @@ class ADV_ATTACK:
         """
         # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
         if ref_class is not None:
-            control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   ref_class] # 目前较正常
+            control_text=[' '.join([s1]*1)+" . "+" . "+s1+params["prompt"] for s1 in   ref_class] # 目前较正常
         elif cam_target_class is not None:
-            control_text=[s1+" . "+" . "+s1+params["prompt"] for s1 in   cam_target_class]
+            control_text=[' '.join([s1]*1)+" . "+" . "+s1+params["prompt"] for s1 in   cam_target_class]
         else :
             control_text=[params["prompt"] ]*B
 
-
+        if negtive_class is not None:
+            negtive_control_text=[' '.join([s1]*5)+" . "+" . "+s1+params["n_prompt"] for s1 in   negtive_class]
+        else :
+            negtive_control_text=[params["n_prompt"]] * B
         # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {
             "c_concat": [control_image],
@@ -1459,7 +1466,7 @@ class ADV_ATTACK:
             "c_concat": None if params["guess_mode"] else [control_image],
             "c_crossattn": [
                 self.model.get_learned_conditioning(
-                    [params["n_prompt"]] * B
+                     negtive_control_text   # [params["n_prompt"]] * B
                 )
             ]
         }
@@ -1491,7 +1498,7 @@ class ADV_ATTACK:
         controlnet_adv_sample=torch.clamp(controlnet_adv_sample,0,1)
 
         # 返回0-1的tensor
-        return controlnet_adv_sample
+        return controlnet_adv_sample,control_image
 
 
     def mask_generate(self,
@@ -1562,7 +1569,7 @@ class ADV_ATTACK:
             mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
 
 
-        return mask_logic_np_select,result_gt
+        return mask_logic_np_select,result_gt,object_class
 
 
     def canny_get_mask(self,
@@ -1588,11 +1595,14 @@ class ADV_ATTACK:
         # 默认使用0填充
         object_image=extract_mask_content(background_imag,mask,mask_value=0)
         object_image,rect_coord_list=crop_mask_region(object_image,mask)
-        if canny_type==0: 
+        if canny_type==0 or canny_type==2: 
             object_image,resize_scale=resize_images_keep_aspect(object_image,(H,W))
-
+        elif canny_type==1:
+            # 不等比例缩放
+            rect_list=[(H,W) for i in range(B)]
+            object_image,resize_scale=resize_images(object_image,rect_list)
         else:
-            resize_scale=None
+            resize_scale=1
 
         canny_for_visual,control_image=canny_with_mask_invert(background_imag=object_image,
                                                               with_mask_edge=with_mask_edge,
@@ -1619,15 +1629,17 @@ class ADV_ATTACK:
             background_imag: 背景图像
             rect_list: 矩形框列表
             all_exp_root: 所有实验根目录
-            statues: 0-表示需要缩放,1-不缩放
+            statues: 0-表示需要缩放,1
         """
-        if statues==0: 
+        if statues==0 or statues==2: 
             
             init_texture=resized_images(init_texture,resize_scale)
             init_texture=paste_images_to_background_no_scale(init_texture,rect_list,background_imag)
 
-        
-
+        elif statues==1:
+            shale_list=[ (temp[3]-temp[1]  ,temp[2]-temp[0])  for temp in    rect_list]
+            init_texture,_=resize_images(init_texture,shale_list)
+            init_texture=paste_images_to_background_no_scale(init_texture,rect_list,background_imag)
         init_texture=batched_tensor_mask_overlay(background_imag,
                                                     init_texture,
                                                     mask_np)
@@ -1693,11 +1705,11 @@ class ADV_ATTACK:
         adv_init_tensor = move_to_gpu_and_cast_dtype(adv_init_tensor,optim_device,optim_data_type)
         adv_init_tensor_gt=adv_init_tensor.clone()
 
-        # 根据类型，修改result_gt,
-        if params["adv_loss_type"]==2:  
-            target_label=params["target_class"]
-            other_label=params["target_class_ref"]
-            result_gt=modify_labels_and_scores(result_gt,target_label,other_label)
+        # # 根据类型，修改result_gt,
+        # if params["adv_loss_type"]==2:  
+        #     target_label=params["target_class"]
+        #     other_label=params["target_class_ref"]
+        #     result_gt=modify_labels_and_scores(result_gt,target_label,other_label)
 
 
         result_gt=move_to_gpu_and_cast_dtype(result_gt,optim_device,optim_data_type)
@@ -1991,316 +2003,11 @@ class ADV_ATTACK:
 
 
 
-    # def optim_main(self,
-    #                   background_imag,
-    #                   ref_tenture=None,
-    #                   adv_init_tensor=None,
-    #                   result_gt=None,
-    #                   mask=None,
-    #                   all_exp_root=[r"./exp/example"],
-    #                   device=None,
-    #                   data_type=None,
-    #                   detect_params=None,
-    #                   attribution_params=None,
-    #                   attack_params=None,
-    #                   ):
-
-    #     params=attack_params
-    #     if device is None:
-
-    #     # 移动到GPU
-    #         optim_device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    #     else:
-    #         optim_device =device
-
-    #     if data_type is None:
-    #         optim_data_type=torch.float32
-    #     else :
-    #         optim_data_type=data_type
-
-    #     if ref_tenture is not None:
-    #         # 
-    #         if ref_tenture.dim()==3:
-    #             ref_tenture=ref_tenture.unsqueeze(0)
-
-
-    #     # adv_init_tensor=normalize_to_01(adv_init_tensor)
-
-    #     adv_init_tensor=adv_init_tensor.detach().clone()
-
-    #     object_detect= self.init_object_detection_return(device=optim_device,
-    #                                                      detect_params=detect_params)
-
-
-
-
-
-    #     if params["attribution_loss_weight"]>0 and params["mask_type"]==0:
-    #         # 参考归因获取
-    #         attri_target_label=result_gt["labels"]
-    #         # 转化为列表，里面是int
-    #         attri_target_label=[ label_idx.detach().cpu().item()    for label_idx in attri_target_label  ]
-    #         # attri_target_label=list(attri_target_label)
-    #         attributions_gt = IG_Detection(
-    #             input_img=background_imag,
-    #             det_model=object_detect,
-    #             model_type=detect_params['attack_model']['model_type'],
-    #             steps=attribution_params['steps'],
-    #             batch_size=attribution_params['batch_size'],
-    #             alpha_star=attribution_params['alpha_star'],
-    #             baseline=attribution_params['baseline'],
-    #             target_obj=attri_target_label
-    #         )
-    #     else :
-    #         attributions_gt=None
-
-    #     adv_init_tensor = move_to_gpu_and_cast_dtype(adv_init_tensor,optim_device,optim_data_type)
-    #     adv_init_tensor_gt=adv_init_tensor.clone()
-
-    #     # 根据类型，修改result_gt,
-    #     if params["adv_loss_type"]==2:  
-    #         target_label=params["target_class"]
-    #         other_label=params["target_class_ref"]
-    #         result_gt=modify_labels_and_scores(result_gt,target_label,other_label)
-
-
-    #     result_gt=move_to_gpu_and_cast_dtype(result_gt,optim_device,optim_data_type)
-        
-    #     if params["attribution_loss_weight"]>0:
-    #         attributions_gt = move_to_gpu_and_cast_dtype(attributions_gt,optim_device,optim_data_type)
-
-
-    #     background_imag=move_to_gpu_and_cast_dtype(background_imag,optim_device,optim_data_type)
-
-    #     if ref_tenture is not None:
-    #         ref_tenture=move_to_gpu_and_cast_dtype(ref_tenture,optim_device,optim_data_type)
-    #     # vae初始化
-    #     if params["optim_object_type"]==1:
-    #         vae_optim=None
-    #     else :
-    #         vae_optim=VAEInferencer(model_name=self.vae_model_path,
-    #                                     dtype=optim_data_type)
-            
-
-    #     if params["optim_object_type"]==0:
-            
-    #         # VAE的范围默认是-1到1
-    #         adv_init_latent=vae_optim.encode_infer(adv_init_tensor*2-1)
-    #         adv_init_latent=move_to_gpu_and_cast_dtype(adv_init_latent,optim_device,optim_data_type)
-    #         adv_init_latent=adv_init_latent.clone()
-    #         adv_init_latent = adv_init_latent.detach()
-    #         adv_init_latent.requires_grad = True
-
-    #         # 优化初始化
-    #         optimizer = torch.optim.Adam([adv_init_latent], lr=params["lr"])
-
-    #     # 后两种，在RGB上优化
-    #     else :
-    #         adv_init_tensor.requires_grad = True
-    #         # 优化初始化
-    #         optimizer = torch.optim.Adam([adv_init_tensor], lr=params["lr"])
-
-
-
-    #     # 1. StepLR：每隔step_size个epoch，学习率乘以gamma
-    #     scheduler = StepLR(
-    #         optimizer, 
-    #         step_size=params["lr_step"],  # 每10个epoch调整一次
-    #         gamma=params["lr_decay"]     # 学习率衰减系数
-    #     )
-
-    #     cross_entro_loss = YOLOv11DetectionLoss(** detect_params,
-    #                                             ** params).to(optim_device)
-    #     if params["attribution_loss_weight"]>0:
-    #         attr_loss_l2 = nn.MSELoss().to(optim_device)
-    #     else :
-    #         attr_loss_l2 = None
-    #     if params["TV_loss_weight"]>0:
-    #         TV_Loss=TVLoss().to(optim_device) 
-    #     else :
-    #         TV_Loss=None
-
-    #     if  params["conext_loss_weight"  ]>0:
-
-    #         # conext_loss_l2 = nn.MSELoss().to(optim_device)
-    #         conext_loss_l2 =MaskedL1L2Loss().to(optim_device)
-    #     else :
-    #         conext_loss_l2=None
-
-    #     if params["perceptual_loss_weight"]>0:
-    #         perceptual_loss = LearnedPerceptualImagePatchSimilarity(
-    #             net_type="vgg",  # 可选：'alex', 'vgg', 'squeeze'
-    #             normalize=True   # 自动归一化输入（匹配ImageNet规范）
-    #         ).to(optim_device)
-    #     else :
-    #         perceptual_loss=None
-        
-
-    #     detect_model_type=detect_params["attack_model"]["model_type"]
-    #     # adv_init_tensor=adv_init_tensor.clone()
-    #     pbar = tqdm(range(params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
-    #     for epoch in pbar:
-
-    #         optimizer.zero_grad()
-
-                    
-    #         if params["optim_object_type"]==0:
-    #             # 优化latent
-    #             adv_tensor_generate01=vae_optim.decode_infer(adv_init_latent)
-    #             # 转化回来，将默认-1到1 的范围转化为0到1
-    #             adv_tensor_generate=(adv_tensor_generate01+1)/2
-    #         elif params["optim_object_type"]==1:
-    #             adv_tensor_generate=adv_init_tensor
-
-    #         elif params["optim_object_type"]==2:
-    #             #直接优化RGB
-    #             adv_init_tensor1=adv_init_tensor*2-1
-    #             adv_tensor_generate01=vae_optim.infer(adv_init_tensor1,sample_posterior=False)
-    #             # 转化回来，将默认-1到1 的范围转化为0到1
-    #             adv_tensor_generate=(adv_tensor_generate01+1)/2
-
-    #         # 利用mask，只优化mask部分
-    #         adv_tensor_optim=batched_tensor_mask_overlay(background_imag,
-    #                                                         adv_tensor_generate,
-    #                                                         mask)
-    #         adv_tensor_optim = adv_tensor_optim.clamp(0.0, 1.0)
-    #         # adv_tensor_optim=tensor_01_to_int8_and_back(adv_tensor_optim)
-    #         # 注意限制范围 
-    #         result_epoch,_=object_detect.detect(adv_tensor_optim,
-    #                                                     file_path=all_exp_root,
-    #                                                     file_name='result_generate.jpg',
-    #                                                     grad_status=True,
-    #                                                     model_type=detect_model_type
-    #                                                     )
-
-
-
-
-
-    #         if params["attribution_loss_weight"]>0 and params["mask_type"]==0:
-    #             # 参考归因获取
-    #             attri_target_label=result_gt["labels"]
-    #             # 转化为列表，里面是int
-    #             attri_target_label=[ label_idx.detach().cpu().item()    for label_idx in attri_target_label  ]
-    #             # attri_target_label=list(attri_target_label)
-    #             attributions_epoch = IG_Detection(
-    #                 input_img=adv_tensor_optim,
-    #                 det_model=object_detect,
-    #                 model_type=detect_params['attack_model']['model_type'],
-    #                 steps=attribution_params['steps'],
-    #                 batch_size=attribution_params['batch_size'],
-    #                 alpha_star=attribution_params['alpha_star'],
-    #                 baseline=attribution_params['baseline'],
-    #                 target_obj=attri_target_label
-    #             )
-    #         else :
-    #             attributions_epoch=None
-
-
-
-
-
-
-            
-
-    #         # result_epoch_f=move_to_gpu_and_cast_dtype(result_epoch,optim_device,optim_data_type)
-    #         result_epoch_f = result_epoch
-    #         if params["attribution_loss_weight"]>0:
-    #             # attributions_epoch_f = move_to_gpu_and_cast_dtype(attributions_epoch,
-    #             #                                                     optim_device,
-    #             #                                                     optim_data_type)
-    #             attributions_epoch_f=attributions_epoch
-    #         # # 4. 可视化结果
-    #         # if attributions_epoch is not None:
-    #         #     visualize_attribution(adv_tensor_optim, attributions_epoch, save_path=all_exp_root,file_name_pre='attribution_gt')
-    #         # else:
-    #         #     print("Attribution failed!")
-    #         if params["attribution_loss_weight"]>0:
-    #             # 这里损失的使用需要注意顺序，不能改变顺序
-    #             attr_loss=attr_loss_l2(attributions_epoch_f,attributions_gt)
-    #         else :
-    #             attr_loss=torch.tensor(0)
-            
-    #         if params["TV_loss_weight"]>0:
-    #             tv_loss=TV_Loss(adv_tensor_optim)
-    #         else :
-    #             tv_loss=torch.tensor(0)
-    #         if  params["conext_loss_weight"  ]>0:    
-    #             # conext_loss=conext_loss_l2(adv_tensor_optim,adv_init_tensor_gt)
-    #             conext_loss=conext_loss_l2(adv_tensor_optim,adv_init_tensor_gt,mask)   
-    #         else :
-    #             conext_loss=torch.tensor(0)
-    #         if params["perceptual_loss_weight"]>0:
-    #             pr_loss=perceptual_loss(normalize_to_01(adv_tensor_optim),ref_tenture)
-    #         else :
-    #             pr_loss=torch.tensor(0)
-    #         loss ,loss_dict= cross_entro_loss(result_epoch_f, result_gt)
-    #         # 根据是否存在损失，选择对应的权重
-    #         total_loss=params["attribution_loss_weight"]*attr_loss+ \
-    #             params["TV_loss_weight"]*tv_loss+ \
-    #             params["perceptual_loss_weight"]*pr_loss+ \
-    #             params["conext_loss_weight"]*conext_loss +\
-    #             loss_dict['class_loss']
-                   
-
-            
-         
-    #         total_loss.backward()
-            
-           
-    #         optimizer.step()
-
-    #         scheduler.step()
-            
-    #         adv_init_tensor.data = torch.clamp(adv_init_tensor.data, 0.0, 1.0)
-
-    #         # 打印损失
-    #         print(f"Epoch {epoch}, total_loss:{total_loss.item():.4f}")
-    #         print(f"class_loss:{loss_dict['class_loss'].item():.4f}, conext_loss:{conext_loss.item():.4f}")
-    #         if params["attribution_loss_weight"]>0:
-    #             print(f"attr_loss:{attr_loss.item():.4f}")
-
-    #         if params["TV_loss_weight"]>0:
-    #             print(f"tv_loss:{tv_loss.item():.4f}")
-
-    #         if params["perceptual_loss_weight"]>0:
-    #             print(f"pr_loss:{pr_loss.item():.4f}")
-
-    #         if params["conext_loss_weight"]>0:
-    #             print(f"conext_loss:{conext_loss.item():.4f}")
-
-    #         # ========== 清理内存（仅删除张量变量） ==========
-    #         tensor_vars = [attr_loss, tv_loss, conext_loss, pr_loss, loss, total_loss]
-    #         for var in tensor_vars:
-    #             del var
-    #         del loss_dict
-    #         # 仅在迭代最后一次调用empty_cache，减少开销
-    #         if epoch == params["optim_epochs"] - 1:
-    #             torch.cuda.empty_cache()
-
-
-    #     self.detect_val(input_image=adv_tensor_optim,
-    #                     input_path=all_exp_root,
-    #                     input_file_name='adv_example',
-    #                     detect_params=detect_params)
-                        
-    #     if adv_tensor_optim is not None:
-    #         # 保存对抗样本
-    #         for i,exp_root_dir in enumerate(all_exp_root):
-
-    #             adv_path=os.path.join(exp_root_dir, 'adv_example.jpg')
-    #             adv_tendor_path=os.path.join(exp_root_dir, 'adv_example.pt')
-    #             adv_tensor_idx=adv_tensor_optim[i]
-    #             adv_tensor_idx=adv_tensor_idx.cpu().detach()
-    #             torch.save(adv_tensor_idx,adv_tendor_path)
-    #             tensor2picture(adv_tensor_optim[i],adv_path)
-
-    #     release_torch_object_memory("perceptual_loss",namespace=locals())
 
 
     def optim_main(
         self,
-        background_imag,
+        background_imag, 
         ref_tenture=None,
         adv_init_tensor=None,
         result_gt=None,
@@ -2339,10 +2046,16 @@ class ADV_ATTACK:
             ref_tenture = ref_tenture.unsqueeze(0)
 
         adv_init_tensor = adv_init_tensor.detach().clone()
+
+
+
+
+
+
         object_detect = self.init_object_detection_return(
             device=optim_device, detect_params=detect_params
         )
-
+        mask_pre=get_true_ratio_per_channel(mask)
         # 归因损失预处理
         attributions_gt = None
         if attack_params["attribution_loss_weight"] > 0 and attack_params["mask_type"] == 0:
@@ -2362,11 +2075,11 @@ class ADV_ATTACK:
         adv_init_tensor = move_to_gpu_and_cast_dtype(adv_init_tensor, optim_device, optim_data_type)
         adv_init_tensor_gt = adv_init_tensor.clone()
 
-        # 修改GT标签（对抗损失类型2）
-        if attack_params["adv_loss_type"] == 2:
-            target_label = attack_params["target_class"]
-            other_label = attack_params["target_class_ref"]
-            result_gt = modify_labels_and_scores(result_gt, target_label, other_label)
+        # # 修改GT标签（对抗损失类型2）
+        # if attack_params["adv_loss_type"] == 2:
+        #     target_label = attack_params["target_class"]
+        #     other_label = attack_params["target_class_ref"]
+        #     result_gt = modify_labels_and_scores(result_gt, target_label, other_label)
 
         result_gt = move_to_gpu_and_cast_dtype(result_gt, optim_device, optim_data_type)
         if attack_params["attribution_loss_weight"] > 0 and attributions_gt is not None:
@@ -2412,12 +2125,16 @@ class ADV_ATTACK:
         detect_model_type = detect_params["attack_model"]["model_type"]
         pbar =tqdm(range(attack_params["optim_epochs"]), desc="Optimizing Adversarial Sample", unit="epoch")
 
+        pr_scale=torch.tensor(mask_pre[0])
+        pr_scale=1/pr_scale # 单位像素感知损失差距，所以需要除以比例
         # ========== 4. 核心优化循环（适配AMP/BF16） ==========
         for epoch in pbar:
             optimizer.zero_grad()
 
             # ========== 前向传播（AMP上下文） ==========
-            with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16 if use_bf16 else torch.float16):
+            with autocast(device_type="cuda",
+                            enabled=use_amp,
+                            dtype=torch.bfloat16 if use_bf16 else torch.float16):
                 # 生成对抗样本
                 if attack_params["optim_object_type"] == 0:
                     adv_tensor_generate01 = vae_optim.decode_infer(adv_init_latent)
@@ -2434,7 +2151,7 @@ class ADV_ATTACK:
                 adv_tensor_optim = adv_tensor_optim.clamp(0.0, 1.0)
 
                 # 检测模型前向
-                result_epoch, _ = object_detect.detect(
+                result_epoch, _ = object_detect.detect_eval(
                     adv_tensor_optim,
                     file_path=all_exp_root,
                     file_name='result_generate.jpg',
@@ -2483,9 +2200,9 @@ class ADV_ATTACK:
                 total_loss = (
                     attack_params["attribution_loss_weight"] * attr_loss
                     + attack_params["TV_loss_weight"] * tv_loss
-                    + attack_params["perceptual_loss_weight"] * pr_loss
+                    + attack_params["perceptual_loss_weight"] * pr_loss*pr_scale
                     + attack_params["conext_loss_weight"] * conext_loss
-                    + loss_dict['class_loss']
+                    + attack_params["class_loss_weight"]*loss_dict['class_loss']
                 )
 
             # ========== 反向传播 + 优化（AMP适配） ==========
@@ -2555,29 +2272,44 @@ class ADV_ATTACK:
                 torch.cuda.empty_cache()
 
         # ========== 5. 验证和保存结果 ==========
-        self.detect_val(
+        adv_result_dict=self.detect_val(
             input_image=adv_tensor_optim,
             input_path=all_exp_root,
             input_file_name='adv_example',
             detect_params=detect_params
         )
 
+        adv_count_dict=count_matched_results(adv_result_dict,result_gt)
+
+
+        temp_tensor=torch.ones_like(background_imag)
+        ref_texture_mask_adv=batched_tensor_mask_overlay(temp_tensor,
+                                        adv_tensor_optim,
+                                        mask)
+
+
+            
         if adv_tensor_optim is not None:
             for i, exp_root_dir in enumerate(all_exp_root):
                 adv_path = os.path.join(exp_root_dir, 'adv_example.jpg')
                 adv_tendor_path = os.path.join(exp_root_dir, 'adv_example.pt')
+                adv_tendor_mask_path=os.path.join(exp_root_dir, 'adv_texture.jpg')
                 adv_tensor_idx = adv_tensor_optim[i].cpu().detach()
                 torch.save(adv_tensor_idx, adv_tendor_path)
                 tensor2picture(adv_tensor_optim[i], adv_path)
 
+                tensor2picture(ref_texture_mask_adv[i], adv_tendor_mask_path)
+
         release_torch_object_memory("perceptual_loss", namespace=locals())
-        return adv_tensor_optim
+        return adv_tensor_optim,adv_count_dict
 
 
 
     def generate_adversarial_mainV5(self,
                                     background_imag=None,
                                     ref_texture=None, 
+                                    ref_canny=None,
+                                    mask_adv=None,
                                     exp_path=[r'./exp/exp_example'],
                                     detect_params=None,
                                     attribution_params=None,
@@ -2615,19 +2347,22 @@ class ADV_ATTACK:
 
         detect_model_type=detect_params['attack_model']['model_type']
 
-        result_gt,object_class =detect_model.detect(background_imag,
+        result_gt,object_class =detect_model.detect_eval(background_imag,
                                                              file_path=exp_path,
                                                              file_name='detect_object_ref.jpg',
                                                              grad_status=True,
                                                              model_type=detect_model_type)
         self.destroy_object_detection(detect_model)
-        # for i,exp_root_dir in enumerate(exp_path):
-        #     tensor2picture(background_imag[i],os.path.join(exp_root_dir, 'origin.jpg')) 
+        for i,exp_root_dir in enumerate(exp_path):
+            tensor2picture(background_imag[i],os.path.join(exp_root_dir, 'origin.jpg')) 
 
         # 多框的分割存在问题，目前只能支持单框，多框需要循环;图片保存未添加
         mask_path=[    os.path.join(exp_path[i], 'mask.jpg') for i in range(len(exp_path))]
         # result_gt 是否覆盖
-        mask_logic_np_select,result_gt=self.mask_generate(
+        if len(result_gt['boxes'][0])<1:
+            return 
+        # 返回的检测框可能是挑选过的
+        mask_logic_np_select,result_gt,object_class=self.mask_generate(
                          background_imag=background_imag,
                         result_gt=result_gt,
                         object_class=object_class,
@@ -2635,10 +2370,26 @@ class ADV_ATTACK:
                         connected_component=params["connected_component"],
                         )
 
+
+        # 调试
+        ref_result_dict=self.detect_val(
+            input_image=background_imag,
+            input_path=exp_path,
+            input_file_name='origin_example',
+            detect_params=detect_params
+        )
+        ref_count_dict=count_matched_results(ref_result_dict,result_gt)
+
+        for model_key in ref_count_dict:
+            if ref_count_dict[model_key] <1:
+                # 不完全匹配
+                return None
+
+
         if mask_logic_np_select is None:
             return None
         
-
+         
        # 提取物体
         control_image,rect_boxes,resize_scale=self.canny_get_mask(
                     background_imag=background_imag,
@@ -2652,9 +2403,7 @@ class ADV_ATTACK:
                     with_content_canny=params["canny_with_content_canny"],
                     )
 
-        control_path=[os.path.join(exp_path[i], 'control.jpg') for i in range(len(exp_path))]
-        for i,exp_root_dir in enumerate(exp_path):
-            tensor2picture(control_image[i],control_path[i])
+
 
         
         """
@@ -2662,33 +2411,61 @@ class ADV_ATTACK:
             =========== controlnet 的初始化,采样 ===============
             ====================================================
         """
-        
+        # 参考canny的处理
         cam_target=[params["cam_target_class"]]*B
+        if ref_canny is not None:
+            if params["canny_type"]==0:
+                ref_canny=fit_canny_to_xyxy_boxes(ref_canny,rect_boxes,resize_scale)
+            if params["canny_type"]==2:
+                ref_canny=center_scale_image_tensor(ref_canny,params["canny_scale"])
+            else :
+                ref_canny=ref_canny
 
-        controlnet_adv_sample=self.init_tex_generate(canny_object=control_image, 
-                                canny_ref=None,
+            control_path=[os.path.join(exp_path[i], 'control_ref.jpg') for i in range(len(exp_path))]
+            for i,exp_root_dir in enumerate(exp_path):
+                tensor2picture(ref_canny[i],control_path[i])
+        else :
+            ref_canny=None
+
+
+        controlnet_adv_sample,control_final=self.init_tex_generate(canny_object=control_image, 
+                                canny_ref=ref_canny,
                                 weight_object=0.5,
-                                threshold=0.5,
+                                threshold=0.1,
                                 cam_target_class=cam_target,
-                                ref_class=None,
+                                ref_class=None, # object_class
+                                negtive_class=object_class,
                                 params=params)
-
+        control_path=[os.path.join(exp_path[i], 'control.jpg') for i in range(len(exp_path))]
+        for i,exp_root_dir in enumerate(exp_path):
+            tensor2picture(control_final[i],control_path[i])
         control_path=[os.path.join(exp_path[i], 'sample.jpg') for i in range(len(exp_path))]
         for i,exp_root_dir in enumerate(exp_path):
             tensor2picture(controlnet_adv_sample[i],control_path[i])
 
+        # scale back
+        resize_scale_back=calculate_resize_scale_back(resize_scale)
         init_texture=self.init_tex_postprocess(init_texture=controlnet_adv_sample,
                                                 background_imag=background_imag,
                                                 mask_np=mask_logic_np_select,
                                                 rect_list=rect_boxes,
-                                                resize_scale=1./resize_scale,
+                                                resize_scale=resize_scale_back,
                                                 statues=params["canny_type"])
 
 
         control_path=[os.path.join(exp_path[i], 'init.jpg') for i in range(len(exp_path))]
         for i,exp_root_dir in enumerate(exp_path):
             tensor2picture(init_texture[i],control_path[i])
-            
+        
+        # # 抠出纹理
+        # temp=torch.zeros_like(background_imag)
+        # object_texture=batched_tensor_mask_overlay(temp,
+        #                                         init_texture,
+        #                                         mask_logic_np_select)
+        # #
+        # object_texture_path=[os.path.join(exp_path[i], 'texture.jpg') for i in range(len(exp_path))]
+        # for i,exp_root_dir in enumerate(exp_path):
+        #     tensor2picture(object_texture[i],object_texture_path[i])
         """
             ====================================================
             =========== controlnet采样后的图像优化 ===============
@@ -2704,16 +2481,42 @@ class ADV_ATTACK:
             ref_texture=batched_tensor_mask_overlay(background_imag,
                                                         ref_texture,
                                                         mask_logic_np_select)
-        self.optim_main(background_imag=background_imag,
-                        ref_tenture=ref_texture,
-                        adv_init_tensor=init_texture,
+
+
+        # 
+        if attack_params["ref_status"]==0:     
+            ref_texture_optim=init_texture
+            init_texture_optim=background_imag
+        elif attack_params["ref_status"]==1:
+            ref_texture_optim=ref_texture
+            init_texture_optim=init_texture
+                 
+
+        #
+        if mask_adv is  None:
+            mask_adv=mask_logic_np_select
+
+            #
+        temp_tensor=torch.ones_like(background_imag)
+        ref_texture_mask_adv=batched_tensor_mask_overlay(temp_tensor,
+                                        init_texture,
+                                        mask_adv)
+
+        path_temp=[os.path.join(exp_path[i], 'mask_adv.jpg') for i in range(len(exp_path))]
+        for i,exp_root_dir in enumerate(exp_path):
+            tensor2picture(ref_texture_mask_adv[i],path_temp[i])
+
+        _,accur=self.optim_main(background_imag=background_imag,
+                        ref_tenture=ref_texture_optim,
+                        adv_init_tensor=init_texture_optim,
                         result_gt=result_gt,
-                        mask=mask_logic_np_select,
+                        mask=mask_adv,
                         all_exp_root=exp_path,
                         detect_params=detect_params,
                         attribution_params=attribution_params,
                         attack_params=attack_params,
                         )
+        return accur
 
         # 优化初始化，包含优化器，调度器，损失函数，优化目标等
         # adv_init_tensor,\
@@ -2932,7 +2735,8 @@ if __name__=='__main__':
 
     #RGB 参数
     attack_config_path=r"models/attack_config.yaml"
-    attack_config_path=r"models/attack_config_optim_latent.yaml"
+
+
     adv_config=load_yaml_config(attack_config_path)
 
 
@@ -2954,7 +2758,9 @@ if __name__=='__main__':
     # 读取图像，转化为tensor
 
     # img_path=r"../data\select_coco\000000005477.jpg"
-    img_path=r"../data\select_coco\000000000724.jpg"
+    # img_path=r"../data\select_coco\000000000724.jpg"
+    img_path=r'data/select_coco/000000079408.jpg'   
+    # img_path=r'data/select_coco/000000001296.jpg'
     img = cv2.imread(img_path)
     img=cv2.resize(img, (512, 512))
     # 转化为tensor
@@ -2964,17 +2770,23 @@ if __name__=='__main__':
     img = cv2_to_tensor(img)
 
 
-    ref_path=r"data/ref.jpg"
-    ref_tenture=cv2.imread(ref_path)
+    ref_path=r"data/control1.jpg"
+    ref_tenture=cv2.imread(ref_path,cv2.IMREAD_GRAYSCALE)
     ref_tenture=cv2.resize(ref_tenture, (512, 512))
-    ref_tenture=cv2_to_tensor(ref_tenture)
+    ref_canny=cv2_to_tensor(ref_tenture)
+    if ref_canny.dim()==3:  # 添加维度
+        ref_canny = ref_canny.unsqueeze(0)
 
     if img.dim()==3:  # 添加维度
         img = img.unsqueeze(0)
 
+    exp_root_test=adv_config["experiment_params"]["experiment_path"]
+    os.makedirs(exp_root_test,exist_ok=True)
     st_time=time.time()
     attack.generate_adversarial_mainV5(background_imag=img,
                                        ref_texture=None,
+                                       ref_canny=ref_canny,
+                                       exp_path=[exp_root_test],
                                         detect_params=adv_config["detect_params"],
                                         attribution_params=adv_config["attribution_params"],
                                         attack_params=adv_config["attak_params"]

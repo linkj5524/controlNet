@@ -209,6 +209,10 @@ class YOLOv11DetectionLoss(nn.Module):
         else :
             self.weight_giou = self.adv_weight_giou
 
+        if not hasattr(self,'target_class'):
+            self.target_class = 16
+        else :
+            self.y_adv=self.target_class
 
         # 判断是否存在penalty_bbox，不存在则创建
         if not hasattr(self, 'penalty_bbox'):  # 判断是否存在属性
@@ -226,7 +230,7 @@ class YOLOv11DetectionLoss(nn.Module):
             elif self.adv_loss_type == 1:  # 默认预测的概率最小，最小是0
                 self.penalty_class = 0
             elif self.adv_loss_type == 2:  # 默认使用L1
-                self.penalty_class = -13.8155
+                self.penalty_class = 0    #  #   -13.8155 
 
             
         if not hasattr(self, 'image_size'):  # 判断是否存在属性
@@ -591,8 +595,8 @@ class YOLOv11DetectionLoss(nn.Module):
 
                 # 4. 映射回原始预测框的索引，并检查匹配有效性
                 best_pred_idx = unmatched_pred_indices[sub_best_idx]  # 子集索引 → 原始索引
-                # valid = (iou_matrix[best_pred_idx] >= self.iou_thres) 
-                valid = (iou_matrix[sub_best_idx] >= 0)  # 检查IoU有效性
+                valid = (iou_matrix[best_pred_idx] >= self.iou_thres) 
+                # valid = (iou_matrix[sub_best_idx] >= 0)  # 检查IoU有效性
                 if not valid:
                     # 无效匹配：施加惩罚
                     total_class_loss += torch.tensor(self.penalty_class, device=device)
@@ -623,8 +627,10 @@ class YOLOv11DetectionLoss(nn.Module):
                 elif self.adv_loss_type == 2:
                     # 攻击损失：-log(p_yadv) + log(p_y)
                     log_probs = matched_pred_scores_vector_log  # [1, num_classes]
-                    y = matched_pred_label.item()
-                    y_adv = current_gt_label.item()
+                    # y = matched_pred_label.item()
+                    # y_adv = current_gt_label.item()
+                    y = current_gt_label.item()
+                    y_adv = self.y_adv
                     log_p_y = log_probs[0, y]
                     log_p_yadv = log_probs[0, y_adv]
                     class_loss = -log_p_yadv + log_p_y
@@ -1113,111 +1119,6 @@ class CustomImageDataset(Dataset):
 
 
 
-class CustomFolderDataset(Dataset):
-    def __init__(self, root_dir, transform=None, 
-                 target_image_name_list=[],
-                 img_extensions=['.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.PNG', '.JPEG','pt']):
-        """
-        自定义数据集：按文件夹分组加载图片（递归查找子文件夹）
-        :param root_dir: 根目录（子文件夹为不同的分组）
-        :param transform: 单张图片的预处理变换
-        :param img_extensions: 支持的图片格式
-        """
-        self.root_dir = root_dir
-        self.transform = transform
-        self.img_extensions = img_extensions
-        # 按文件夹分组存储数据：每个元素为 (文件夹名称, 该文件夹下所有图片路径列表)
-        self.folder_data = self._get_folder_img_paths()
-        self.target_image_name_list = target_image_name_list
-        if len(target_image_name_list)<=0:
-            # 报错
-            raise ValueError(f"请指定目标图片名称列表！")
-
-    def _get_folder_img_paths(self):
-        """递归遍历目录，按文件夹分组获取图片路径"""
-        folder_dict = {}  # key: 文件夹路径, value: 该文件夹下的图片路径列表
-        
-        # 递归遍历所有子目录
-        for root, dirs, files in os.walk(self.root_dir):
-            # 过滤当前文件夹下的图片
-            img_paths = []
-            for file in files:
-                if any(file.endswith(ext) for ext in self.img_extensions):
-                    img_paths.append(os.path.join(root, file))
-            # 仅保留包含图片的文件夹
-            if img_paths:
-                # 用文件夹的相对路径作为名称（也可用basename）
-                folder_name = os.path.relpath(root, self.root_dir)
-                #
-                
-                folder_dict[folder_name] = img_paths
-        
-        if not folder_dict:
-            raise ValueError(f"目录 {self.root_dir} 下未找到包含图片的文件夹！")
-        
-        # 转换为列表，便于按索引访问：[(folder_name, img_paths), ...]
-        folder_data = [(name, paths) for name, paths in folder_dict.items()]
-        return folder_data
-
-    def __len__(self):
-        """返回文件夹的总数（而非图片总数）"""
-        return len(self.folder_data)
-
-    def __getitem__(self, idx):
-        """
-        按索引返回单个文件夹的所有图片数据
-        :param idx: 文件夹索引
-        :return: 
-            folder_name: 文件夹名称（str）
-            img_tensors: 该文件夹下所有图片的张量列表 (list[torch.Tensor])
-            img_names: 该文件夹下所有图片的名称列表 (list[str])
-        """
-        # 获取当前文件夹的名称和图片路径
-        folder_name, img_paths = self.folder_data[idx]
-        
-        img_tensors = []  # 存储该文件夹下所有图片的张量
-        img_names = []    # 存储该文件夹下所有图片的名称（不含路径）
-        
-        for img_path in img_paths:
-            image_name_1=os.path.basename(img_path)
-                # 去除后缀
-            image_name=image_name_1.split('.')[0]
-            if image_name_1 in self.target_image_name_list:
-                # 根据后缀，读取文件，如果是pt文件，则加载为张量
-
-                try:
-                    if img_path.endswith('.pt'):
-                        img = torch.load(img_path)
-                    else:    
-                        # 读取图片并转为RGB
-                        img = Image.open(img_path).convert('RGB')
-                        # 应用预处理变换
-                        if self.transform:
-                            img = self.transform(img)
-                except Exception as e:
-                    raise RuntimeError(f"加载图片失败 {img_path}：{e}")
-                
-
-                
-                # 收集张量和图片名称
-                img_tensors.append(img)
-
-                img_names.append(os.path.basename(image_name_1))  # 仅保留图片文件名，去除后缀
-                # img_names.append(os.path.basename(img_path))
-            else:
-                continue
-        
-        return folder_name, img_tensors, img_names
-
-    def get_folder_by_name(self, folder_name):
-        """按文件夹名称查找并返回该文件夹的图片数据（非索引方式）"""
-        for idx, (name, paths) in enumerate(self.folder_data):
-            if name == folder_name:
-                return self.__getitem__(idx)
-        raise ValueError(f"未找到文件夹：{folder_name}")
-
-
-
 # class CustomFolderDataset(Dataset):
 #     def __init__(self, root_dir, transform=None, 
 #                  target_image_name_list=[],
@@ -1226,21 +1127,17 @@ class CustomFolderDataset(Dataset):
 #         自定义数据集：按文件夹分组加载图片（递归查找子文件夹）
 #         :param root_dir: 根目录（子文件夹为不同的分组）
 #         :param transform: 单张图片的预处理变换
-#         :param target_image_name_list: 目标图片名称列表（需匹配的文件名）
 #         :param img_extensions: 支持的图片格式
 #         """
 #         self.root_dir = root_dir
 #         self.transform = transform
 #         self.img_extensions = img_extensions
-#         self.target_image_name_list = [name.strip() for name in target_image_name_list]  # 去除空格
-        
-#         if len(self.target_image_name_list) <= 0:
-#             raise ValueError(f"请指定目标图片名称列表！")
-        
 #         # 按文件夹分组存储数据：每个元素为 (文件夹名称, 该文件夹下所有图片路径列表)
 #         self.folder_data = self._get_folder_img_paths()
-#         # 过滤：仅保留可能包含目标图片的文件夹（提前筛除空文件夹）
-#         self.folder_data = self._filter_valid_folders()
+#         self.target_image_name_list = target_image_name_list
+#         if len(target_image_name_list)<=0:
+#             # 报错
+#             raise ValueError(f"请指定目标图片名称列表！")
 
 #     def _get_folder_img_paths(self):
 #         """递归遍历目录，按文件夹分组获取图片路径"""
@@ -1255,7 +1152,10 @@ class CustomFolderDataset(Dataset):
 #                     img_paths.append(os.path.join(root, file))
 #             # 仅保留包含图片的文件夹
 #             if img_paths:
+#                 # 用文件夹的相对路径作为名称（也可用basename）
 #                 folder_name = os.path.relpath(root, self.root_dir)
+#                 #
+                
 #                 folder_dict[folder_name] = img_paths
         
 #         if not folder_dict:
@@ -1265,71 +1165,53 @@ class CustomFolderDataset(Dataset):
 #         folder_data = [(name, paths) for name, paths in folder_dict.items()]
 #         return folder_data
 
-#     def _filter_valid_folders(self):
-#         """提前过滤：仅保留包含目标图片的文件夹，减少后续空样本"""
-#         valid_folders = []
-#         for folder_name, img_paths in self.folder_data:
-#             # 检查该文件夹是否有目标图片
-#             has_target = any(
-#                 os.path.basename(path) in self.target_image_name_list 
-#                 for path in img_paths
-#             )
-#             if has_target:
-#                 valid_folders.append((folder_name, img_paths))
-#         return valid_folders
-
 #     def __len__(self):
-#         """返回有效文件夹的总数（仅包含目标图片的文件夹）"""
+#         """返回文件夹的总数（而非图片总数）"""
 #         return len(self.folder_data)
 
 #     def __getitem__(self, idx):
 #         """
-#         按索引返回单个文件夹的所有匹配图片数据
-#         若无匹配图片，返回 (None, [], []) 便于后续过滤
+#         按索引返回单个文件夹的所有图片数据
 #         :param idx: 文件夹索引
 #         :return: 
-#             folder_name: 文件夹名称（str/None）
-#             img_tensors: 匹配图片的张量列表 (list[torch.Tensor])
-#             img_names: 匹配图片的名称列表 (list[str])
+#             folder_name: 文件夹名称（str）
+#             img_tensors: 该文件夹下所有图片的张量列表 (list[torch.Tensor])
+#             img_names: 该文件夹下所有图片的名称列表 (list[str])
 #         """
-#         # 边界检查
-#         if idx < 0 or idx >= len(self.folder_data):
-#             return None, [], []
-        
 #         # 获取当前文件夹的名称和图片路径
 #         folder_name, img_paths = self.folder_data[idx]
         
-#         img_tensors = []  # 存储该文件夹下匹配的图片张量
-#         img_names = []    # 存储该文件夹下匹配的图片名称
+#         img_tensors = []  # 存储该文件夹下所有图片的张量
+#         img_names = []    # 存储该文件夹下所有图片的名称（不含路径）
         
 #         for img_path in img_paths:
-#             img_basename = os.path.basename(img_path)
-#             # 检查是否是目标图片
-#             if img_basename not in self.target_image_name_list:
-#                 continue  # 跳过非目标图片
-            
-#             try:
-#                 # 加载pt文件或图片
-#                 if img_path.endswith('.pt'):
-#                     img = torch.load(img_path, map_location='cpu')  # 避免GPU占用
-#                 else:    
-#                     # 读取图片并转为RGB
-#                     with Image.open(img_path) as img_file:
-#                         img = img_file.convert('RGB')
+#             image_name_1=os.path.basename(img_path)
+#                 # 去除后缀
+#             image_name=image_name_1.split('.')[0]
+#             if image_name_1 in self.target_image_name_list:
+#                 # 根据后缀，读取文件，如果是pt文件，则加载为张量
+
+#                 try:
+#                     if img_path.endswith('.pt'):
+#                         img = torch.load(img_path)
+#                     else:    
+#                         # 读取图片并转为RGB
+#                         img = Image.open(img_path).convert('RGB')
 #                         # 应用预处理变换
 #                         if self.transform:
 #                             img = self.transform(img)
-#             except Exception as e:
-#                 print(f"警告：加载图片失败 {img_path}，已跳过：{e}")
-#                 continue  # 跳过加载失败的图片
-            
-#             # 收集有效数据
-#             img_tensors.append(img)
-#             img_names.append(img_basename)
-        
-#         # 若无匹配图片，返回None标识
-#         if len(img_tensors) == 0:
-#             return None, [], []
+#                 except Exception as e:
+#                     raise RuntimeError(f"加载图片失败 {img_path}：{e}")
+                
+
+                
+#                 # 收集张量和图片名称
+#                 img_tensors.append(img)
+
+#                 img_names.append(os.path.basename(image_name_1))  # 仅保留图片文件名，去除后缀
+#                 # img_names.append(os.path.basename(img_path))
+#             else:
+#                 continue
         
 #         return folder_name, img_tensors, img_names
 
@@ -1338,29 +1220,132 @@ class CustomFolderDataset(Dataset):
 #         for idx, (name, paths) in enumerate(self.folder_data):
 #             if name == folder_name:
 #                 return self.__getitem__(idx)
-#         print(f"警告：未找到文件夹 {folder_name}，返回空数据")
-#         return None, [], []
+#         raise ValueError(f"未找到文件夹：{folder_name}")
 
-# # -------------------------- 关键：自定义Collate_fn 过滤空样本 --------------------------
-# def custom_collate_fn(batch):
-#     """
-#     过滤空样本，避免DataLoader拼接报错
-#     :param batch: 列表，每个元素为 (folder_name, img_tensors, img_names)
-#     :return: 过滤后的有效数据
-#     """
-#     # 过滤空样本（folder_name为None的样本）
-#     valid_batch = [item for item in batch if item[0] is not None and len(item[1]) > 0]
-    
-#     # 若无有效样本，返回空列表
-#     if len(valid_batch) == 0:
-#         return [], [], []
-    
-#     # 拆分有效样本
-#     folder_names = [item[0] for item in valid_batch]
-#     img_tensors = [tensor for item in valid_batch for tensor in item[1]]  # 展平张量列表
-#     img_names = [name for item in valid_batch for name in item[2]]      # 展平名称列表
-    
-#     return folder_names, img_tensors, img_names
+
+class CustomFolderDataset(Dataset):
+    def __init__(self, root_dir, transform=None, 
+                 target_image_name_list=[],
+                 img_extensions=['.jpg', '.jpeg', '.png', '.bmp', '.JPG', '.PNG', '.JPEG','pt']):
+        """
+        自定义数据集：按文件夹分组加载图片（递归查找子文件夹）
+        仅保留包含全部目标图片的文件夹
+        :param root_dir: 根目录（子文件夹为不同的分组）
+        :param transform: 单张图片的预处理变换
+        :param target_image_name_list: 必须包含的目标图片名称列表（带后缀，如 ['1.jpg', '2.pt']）
+        :param img_extensions: 支持的图片格式
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.img_extensions = img_extensions
+        self.target_image_name_list = target_image_name_list
+        
+        # 验证目标列表非空
+        if len(target_image_name_list) <= 0:
+            raise ValueError(f"请指定目标图片名称列表！")
+        
+        # 先获取所有包含图片的文件夹，再过滤出包含全部目标文件的文件夹
+        all_folder_data = self._get_all_folder_img_paths()
+        self.folder_data = self._filter_complete_folders(all_folder_data)
+        
+        if not self.folder_data:
+            raise ValueError(f"目录 {self.root_dir} 下未找到包含全部目标文件的文件夹！")
+
+    def _get_all_folder_img_paths(self):
+        """递归遍历目录，获取所有包含图片的文件夹路径（原始逻辑，无过滤）"""
+        folder_dict = {}  # key: 文件夹路径, value: 该文件夹下的图片路径列表
+        
+        # 递归遍历所有子目录
+        for root, dirs, files in os.walk(self.root_dir):
+            # 过滤当前文件夹下的图片
+            img_paths = []
+            for file in files:
+                if any(file.endswith(ext) for ext in self.img_extensions):
+                    img_paths.append(os.path.join(root, file))
+            # 仅保留包含图片的文件夹
+            if img_paths:
+                folder_name = os.path.relpath(root, self.root_dir)
+                folder_dict[folder_name] = img_paths
+        
+        if not folder_dict:
+            raise ValueError(f"目录 {self.root_dir} 下未找到包含图片的文件夹！")
+        
+        # 转换为列表：[(folder_name, img_paths), ...]
+        folder_data = [(name, paths) for name, paths in folder_dict.items()]
+        return folder_data
+
+    def _filter_complete_folders(self, all_folder_data):
+        """过滤出包含全部目标文件的文件夹"""
+        complete_folders = []
+        
+        # 转换目标列表为集合，方便快速查找
+        target_set = set(self.target_image_name_list)
+        
+        for folder_name, img_paths in all_folder_data:
+            # 获取当前文件夹下的所有图片文件名（带后缀）
+            folder_file_names = set([os.path.basename(path) for path in img_paths])
+            
+            # 检查是否包含所有目标文件
+            if target_set.issubset(folder_file_names):
+                complete_folders.append((folder_name, img_paths))
+        
+        return complete_folders
+
+    def __len__(self):
+        """返回符合条件的文件夹总数（而非图片总数）"""
+        return len(self.folder_data)
+
+    def __getitem__(self, idx):
+        """
+        按索引返回单个文件夹的所有图片数据
+        :param idx: 文件夹索引
+        :return: 
+            folder_name: 文件夹名称（str）
+            img_tensors: 该文件夹下所有目标图片的张量列表 (list[torch.Tensor])
+            img_names: 该文件夹下所有目标图片的名称列表 (list[str])
+        """
+        # 获取当前文件夹的名称和图片路径
+        folder_name, img_paths = self.folder_data[idx]
+        
+        img_tensors = []  # 存储该文件夹下所有图片的张量
+        img_names = []    # 存储该文件夹下所有图片的名称（含后缀）
+        
+        # 按目标列表顺序加载，保证顺序一致性
+        for target_name in self.target_image_name_list:
+            # 找到对应文件的路径
+            target_path = None
+            for img_path in img_paths:
+                if os.path.basename(img_path) == target_name:
+                    target_path = img_path
+                    break
+            
+            if not target_path:
+                raise RuntimeError(f"理论上不会出现此错误：文件夹 {folder_name} 缺少目标文件 {target_name}")
+            
+            try:
+                if target_path.endswith('.pt'):
+                    img = torch.load(target_path)
+                else:    
+                    # 读取图片并转为RGB
+                    img = Image.open(target_path).convert('RGB')
+                    # 应用预处理变换
+                    if self.transform:
+                        img = self.transform(img)
+            except Exception as e:
+                raise RuntimeError(f"加载图片失败 {target_path}：{e}")
+            
+            # 收集张量和图片名称
+            img_tensors.append(img)
+            img_names.append(target_name)
+        
+        return folder_name, img_tensors, img_names
+
+    def get_folder_by_name(self, folder_name):
+        """按文件夹名称查找并返回该文件夹的图片数据（非索引方式）"""
+        for idx, (name, paths) in enumerate(self.folder_data):
+            if name == folder_name:
+                return self.__getitem__(idx)
+        raise ValueError(f"未找到文件夹：{folder_name}")
 
 
 
@@ -2017,9 +2002,372 @@ def crop_mask_region(
     return cropped_imgs, rect_coord_list
 
 
+def map_coco_to_yolo_labels(raw_labels_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    将COCO官方ID的Tensor标签映射为YOLO ID的Tensor标签
+    核心特性：
+    1. 保持输入Tensor的设备（CPU/GPU）一致
+    2. 不中断计算图的梯度传播
+    3. 无效COCO ID（如12、99）映射为-1
+    4. 自动处理索引越界问题
+    
+    :param raw_labels_tensor: 输入的COCO ID Tensor，支持任意形状，dtype需为long
+    :return: 映射后的YOLO ID Tensor，设备/梯度属性与输入完全一致
+    """
+    # 1. 定义COCO -> YOLO 核心映射字典
+    coco2yolo_class_mapping = {
+        1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+        11: 10, 13: 11, 14: 12, 15: 13, 16: 14, 17: 15, 18: 16, 19: 17, 20: 18, 21: 19,
+        22: 20, 23: 21, 24: 22, 25: 23, 27: 24, 28: 25, 31: 26, 32: 27, 33: 28, 34: 29,
+        35: 30, 36: 31, 37: 32, 38: 33, 39: 34, 40: 35, 41: 36, 42: 37, 43: 38, 44: 39,
+        46: 40, 47: 41, 48: 42, 49: 43, 50: 44, 51: 45, 52: 46, 53: 47, 54: 48, 55: 49,
+        56: 50, 57: 51, 58: 52, 59: 53, 60: 54, 61: 55, 62: 56, 63: 57, 64: 58, 65: 59,
+        67: 60, 70: 61, 72: 62, 73: 63, 74: 64, 75: 65, 76: 66, 77: 67, 78: 68, 79: 69,
+        80: 70, 81: 71, 82: 72, 84: 73, 85: 74, 86: 75, 87: 76, 88: 77, 89: 78, 90: 79
+    }
+    
+    # 2. 校验输入类型（避免非long型tensor导致索引错误）
+    if raw_labels_tensor.dtype != torch.long:
+        raise TypeError(f"输入tensor的dtype必须是torch.long，当前为{raw_labels_tensor.dtype}")
+    
+    # 3. 获取输入设备，确保映射表与输入同设备
+    device = raw_labels_tensor.device
+    
+    # 4. 构建Tensor版映射表（默认值-1，覆盖COCO ID 0-90）
+    max_coco_id = 90
+    mapping_tensor = torch.full((max_coco_id + 1,), -1, dtype=torch.long, device=device)
+    for coco_id, yolo_id in coco2yolo_class_mapping.items():
+        mapping_tensor[coco_id] = yolo_id
+    
+    # 5. 核心映射：限制索引范围+tensor索引（保留梯度/设备）
+    clamped_labels = raw_labels_tensor.clamp(0, max_coco_id)  # 防止越界
+    mapped_labels = mapping_tensor[clamped_labels]
+    
+    # 6. 继承输入的梯度属性（若输入有requires_grad=True，映射结果也保留）
+    mapped_labels.requires_grad = raw_labels_tensor.requires_grad
+    
+    return mapped_labels
 
 
 
+
+def calculate_box_iou(box1: torch.Tensor, box2: torch.Tensor) -> float:
+    """
+    计算两个检测框的IoU（Intersection over Union）
+    修复：兼容BFloat16张量类型转换
+    输入框格式：[x1, y1, x2, y2]（像素坐标或归一化坐标均可，需保持一致）
+    """
+    # 核心修复：处理BFloat16类型（先转float32再转numpy）
+    def safe_tensor_to_numpy(tensor):
+        # 若为BFloat16，先转换为float32
+        if tensor.dtype == torch.bfloat16:
+            tensor = tensor.to(torch.float32)
+        # 若为CUDA tensor，先转CPU
+        if tensor.is_cuda:
+            tensor = tensor.cpu()
+        # detach()    
+        tensor = tensor.detach()
+        # 
+        return tensor.numpy()
+    
+    # 安全转换为numpy（兼容BFloat16/CUDA/CPU）
+    box1_np = safe_tensor_to_numpy(box1)
+    box2_np = safe_tensor_to_numpy(box2)
+    
+    # 计算交集坐标
+    x1 = max(box1_np[0], box2_np[0])
+    y1 = max(box1_np[1], box2_np[1])
+    x2 = min(box1_np[2], box2_np[2])
+    y2 = min(box1_np[3], box2_np[3])
+    
+    # 计算交集面积
+    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter_area == 0:
+        return 0.0
+    
+    # 计算两个框的面积
+    box1_area = (box1_np[2] - box1_np[0]) * (box1_np[3] - box1_np[1])
+    box2_area = (box2_np[2] - box2_np[0]) * (box2_np[3] - box2_np[1])
+    
+    # 计算IoU
+    iou = inter_area / (box1_area + box2_area - inter_area + 1e-6)
+    return iou
+
+# def count_matched_results(results_dict: dict, 
+#                                    ref_result: dict, 
+#                                    iou_threshold: float = 0.5,
+#                                    conf_threshold: float = 0.5) -> tuple:
+#     """
+#     统计每个模型的batch整体匹配准确率（所有有效batch的匹配比例）
+#     核心逻辑：
+#         1. 遍历每个模型的每个result，逐batch判断是否匹配参考batch的第一个框；
+#         2. 累计该模型的「总有效batch数」和「匹配成功batch数」；
+#         3. 准确率 = 匹配成功batch数 / 总有效batch数（无数据时为0.0）。
+    
+#     单batch匹配条件（需同时满足）：
+#         - 该batch有检测框；
+#         - 存在至少一个框与参考框的IoU ≥ iou_threshold；
+#         - 该框置信度 ≥ conf_threshold；
+#         - 该框label与参考框完全一致。
+
+#     参数：
+#         results_dict: 模型检测结果字典，键=模型名，值=该模型的result列表（每个result含boxes/scores/labels）；
+#         ref_result: 参考result字典（每个batch取第一个框作为匹配目标）；
+#         iou_threshold: IoU匹配阈值（0-1），默认0.5；
+#         conf_threshold: 置信度阈值（0-1），默认0.5。
+
+#     返回：
+#         (simple_accuracy, detailed_stats): 
+#             - simple_accuracy: 简洁字典 {模型名: batch匹配准确率}；
+#             - detailed_stats: 详细统计字典 {模型名: {total_batches: 总有效batch数, matched_batches: 匹配成功数, accuracy: 准确率}}。
+#     """
+#     # 基础校验：参考result的必填字段和有效batch数
+#     required_keys = ['boxes', 'scores', 'labels']
+#     for key in required_keys:
+#         if key not in ref_result:
+#             raise ValueError(f"参考result缺少关键字段：{key}")
+    
+#     ref_batch_num = len(ref_result['labels'])
+#     if ref_batch_num == 0:
+#         raise ValueError("参考result中无有效batch数据")
+
+#     # 提取参考每个batch的第一个框特征（None表示参考batch为空，不统计）
+#     ref_batch_features = []
+#     for batch_idx in range(ref_batch_num):
+#         if (len(ref_result['labels'][batch_idx]) == 0 or 
+#             len(ref_result['boxes'][batch_idx]) == 0 or 
+#             len(ref_result['scores'][batch_idx]) == 0):
+#             ref_batch_features.append(None)
+#             continue
+#         ref_batch_features.append({
+#             'box': ref_result['boxes'][batch_idx][0],
+#             'label': ref_result['labels'][batch_idx][0]
+#         })
+
+#     # 初始化详细统计字典
+#     detailed_stats = {}
+#     for model_name in results_dict.keys():
+#         detailed_stats[model_name] = {
+#             "total_batches": 0,   # 该模型的总有效batch数
+#             "matched_batches": 0, # 匹配成功的batch数
+#             "accuracy": 0.0       # 最终准确率
+#         }
+
+#     # 遍历每个模型，逐result、逐batch统计
+#     for model_name, results_list in results_dict.items():
+#         total = 0
+#         matched = 0
+
+#         for res_idx, res_dict in enumerate(results_list):
+#             # 跳过batch数量与参考不一致的result（无有效batch）
+#             curr_batch_num = len(res_dict['labels'])
+#             if curr_batch_num != ref_batch_num:
+#                 print(f"警告：模型[{model_name}] Result[{res_idx}]的batch数({curr_batch_num})与参考({ref_batch_num})不一致，跳过")
+#                 continue
+
+#             # 遍历该result的每个batch，独立判断匹配状态
+#             for batch_idx in range(ref_batch_num):
+#                 ref_feat = ref_batch_features[batch_idx]
+#                 if ref_feat is None:  # 参考batch为空，不统计
+#                     continue
+
+#                 # 累计总有效batch数
+#                 total += 1
+
+#                 # 获取当前batch的检测结果
+#                 curr_labels = res_dict['labels'][batch_idx]
+#                 curr_boxes = res_dict['boxes'][batch_idx]
+#                 curr_scores = res_dict['scores'][batch_idx]
+
+#                 # 情况1：当前batch无检测框 → 匹配失败
+#                 if (len(curr_labels) == 0 or len(curr_boxes) == 0 or len(curr_scores) == 0):
+#                     continue
+
+#                 # 情况2：检查是否有符合条件的检测框
+#                 batch_matched = False
+#                 for box_idx in range(len(curr_labels)):
+#                     curr_box = curr_boxes[box_idx]
+#                     curr_label = curr_labels[box_idx]
+#                     curr_score = curr_scores[box_idx]
+
+#                     # 核心匹配条件
+#                     label_match = torch.equal(curr_label, ref_feat['label']) if torch.is_tensor(curr_label) else (curr_label == ref_feat['label'])
+#                     conf_match = curr_score >= conf_threshold
+#                     iou_match = calculate_box_iou(curr_box, ref_feat['box']) >= iou_threshold
+
+#                     if label_match and conf_match and iou_match:
+#                         batch_matched = True
+#                         break
+
+#                 # 匹配成功则累计
+#                 if batch_matched:
+#                     matched += 1
+
+#         # 更新该模型的统计结果
+#         detailed_stats[model_name]["total_batches"] = total
+#         detailed_stats[model_name]["matched_batches"] = matched
+#         detailed_stats[model_name]["accuracy"] = round(matched / total if total > 0 else 0.0, 4)
+
+#     # 生成简洁的准确率字典（仅返回模型名+准确率）
+#     simple_accuracy = {name: stats["accuracy"] for name, stats in detailed_stats.items()}
+
+#     return simple_accuracy, detailed_stats
+
+
+def count_matched_results(model_results_dict: dict, 
+                                   ref_result: dict, 
+                                   iou_threshold: float = 0.5,
+                                   conf_threshold: float = 0.5) -> dict:
+    """
+    统计不同模型的batch匹配准确率（每个模型对应单个result字典）
+    匹配规则（单batch）：
+    1. 对位匹配：result的第i个batch ↔ ref_result的第i个batch
+    2. 单batch匹配条件（需同时满足）：
+       - 该batch中存在至少一个检测框
+       - 检测框与参考batch第一个框的IoU ≥ iou_threshold
+       - 检测框置信度(scores) ≥ conf_threshold
+       - 检测框label与参考框完全一致
+    
+    参数：
+        model_results_dict: 模型检测结果字典，键=模型名称，值=该模型的单个检测结果字典（含boxes/scores/labels）
+        ref_result: 参考result字典（每个batch取第一个检测框作为匹配目标）
+        iou_threshold: IoU匹配阈值（0-1），默认0.5
+        conf_threshold: 置信度匹配阈值（0-1），默认0.5
+    
+    返回：
+        model_accuracy_dict: 各模型batch匹配准确率字典，结构：{模型名: 准确率（0-1）}
+    """
+    # 1. 基础校验
+    required_keys = ['boxes', 'scores', 'labels']
+    for key in required_keys:
+        if key not in ref_result:
+            raise ValueError(f"参考result缺少关键字段：{key}")
+    
+    ref_batch_num = len(ref_result['labels'])
+    if ref_batch_num == 0:
+        raise ValueError("参考result中无有效batch数据")
+    
+    # 2. 提取参考result的每个batch的第一个框特征
+    ref_batch_features = []
+    for batch_idx in range(ref_batch_num):
+        # 跳过空的参考batch（后续该batch视为"无需匹配"）
+        if (len(ref_result['labels'][batch_idx]) == 0 or 
+            len(ref_result['boxes'][batch_idx]) == 0 or 
+            len(ref_result['scores'][batch_idx]) == 0):
+            ref_batch_features.append(None)
+            continue
+        
+        ref_box = ref_result['boxes'][batch_idx][0]
+        ref_label = ref_result['labels'][batch_idx][0]
+        ref_batch_features.append({
+            'box': ref_box,
+            'label': ref_label
+        })
+    
+    # 3. 初始化模型准确率字典
+    model_accuracy_dict = {}
+    
+    # 4. 遍历每个模型（每个模型对应单个result）
+    for model_name, res_dict in model_results_dict.items():
+        # 校验当前模型result的batch数量与参考一致
+        curr_batch_num = len(res_dict['labels'])
+        if curr_batch_num != ref_batch_num:
+            print(f"警告：模型[{model_name}]的batch数量({curr_batch_num})与参考({ref_batch_num})不一致，准确率记为0.0")
+            model_accuracy_dict[model_name] = 0.0
+            continue
+        
+        total_valid_batches = 0  # 该模型的总有效batch数
+        matched_batches = 0      # 该模型匹配成功的batch数
+        
+        # 遍历该result的每个batch，逐一批配
+        for batch_idx in range(ref_batch_num):
+            ref_feat = ref_batch_features[batch_idx]
+            
+            # 情况1：参考batch为空 → 无需统计该batch
+            if ref_feat is None:
+                continue
+            
+            # 该batch计入总有效数
+            total_valid_batches += 1
+            
+            # 情况2：当前batch为空 → 匹配失败
+            curr_labels = res_dict['labels'][batch_idx]
+            curr_boxes = res_dict['boxes'][batch_idx]
+            curr_scores = res_dict['scores'][batch_idx]
+            if (len(curr_labels) == 0 or 
+                len(curr_boxes) == 0 or 
+                len(curr_scores) == 0):
+                continue  # 匹配失败，不计数
+            
+            # 情况3：检查当前batch是否有符合条件的检测框
+            batch_matched = False
+            for box_idx in range(len(curr_labels)):
+                # 当前检测框特征
+                curr_box = curr_boxes[box_idx]
+                curr_label = curr_labels[box_idx]
+                curr_score = curr_scores[box_idx]
+                
+                # 核心匹配条件
+                label_match = torch.equal(curr_label, ref_feat['label']) if torch.is_tensor(curr_label) else (curr_label == ref_feat['label'])
+                conf_match = curr_score >= conf_threshold
+                iou_match = calculate_box_iou(curr_box, ref_feat['box']) >= iou_threshold
+                
+                if label_match and conf_match and iou_match:
+                    batch_matched = True
+                    break  # 找到一个匹配框即可
+            
+            # 该batch匹配成功 → 计数+1
+            if batch_matched:
+                matched_batches += 1
+        
+        # 计算该模型的准确率（避免除以0）
+        if total_valid_batches == 0:
+            model_accuracy = 0.0
+        else:
+            model_accuracy = round(matched_batches / total_valid_batches, 4)
+        
+        # 存入结果字典
+        model_accuracy_dict[model_name] = model_accuracy
+    
+    return model_accuracy_dict
+
+
+
+
+def resize_images(
+    images: torch.Tensor,
+    target_size
+) -> Tuple[torch.Tensor, float, float]:
+    if len(images.shape) != 4:
+        raise ValueError(f"输入张量需为4维 (B,C,H,W)，当前shape: {images.shape}")
+
+    
+    # 2. 获取原尺寸和目标尺寸
+    B, C, orig_h, orig_w = images.shape
+     
+
+    
+    # 4. 逐Batch缩放（支持批量处理，保持维度一致）
+    resized_images = []
+    target_scale_list=[]
+    for b in range(B):
+        target_h, target_w = target_size[b]
+        # 3. 计算缩放比例（非等比例，宽/高独立计算）
+        scale_w = target_w / orig_w  # 宽度缩放比例
+        scale_h = target_h / orig_h  # 高度缩放比例
+        img_single = images[b:b+1]  # 取单Batch: (1, C, orig_h, orig_w)
+        # 核心：非等比例拉伸到目标尺寸（antialias=True优化缩放质量）
+        img_resized = torchvision.transforms.functional.resize(
+            img_single, 
+            size=(target_h, target_w),  # 直接拉伸适配目标尺寸
+            antialias=True
+        )
+        resized_images.append(img_resized)
+        target_scale_list.append((scale_w, scale_h))
+    
+    # 5. 合并Batch并返回结果
+    resized_images = torch.cat(resized_images, dim=0)
+    return resized_images,target_scale_list
 
 
 def resize_images_keep_aspect(
@@ -2085,6 +2433,57 @@ def resize_images_keep_aspect(
 
     return resized_images, scales
 
+def center_scale_image_tensor(img_tensor, scale=0.5, pad_value=0):
+    """
+    对张量格式的图像进行中心等比例缩放，空白区域填充指定值（默认0），输出尺寸与输入一致
+    
+    Args:
+        img_tensor (torch.Tensor): 输入图像张量，格式为 [C, H, W] 或 [B, C, H, W]
+        scale (float): 缩放比例（0 < scale ≤ 1 缩小，scale > 1 放大）
+        pad_value (int/float): 填充值，默认0
+    
+    Returns:
+        torch.Tensor: 缩放后图像张量，尺寸与输入完全一致
+    """
+    # 检查输入维度，统一处理为4维 [B, C, H, W]
+    is_3d = len(img_tensor.shape) == 3
+    if is_3d:
+        img_tensor = img_tensor.unsqueeze(0)  # [C, H, W] → [1, C, H, W]
+    
+    B, C, H, W = img_tensor.shape
+    
+    # 1. 计算缩放后的尺寸（保持宽高比）
+    new_h = int(H * scale)
+    new_w = int(W * scale)
+    # 确保缩放后尺寸至少为1（避免scale过小导致尺寸为0）
+    new_h = max(1, new_h)
+    new_w = max(1, new_w)
+    
+    # 2. 对图像进行缩放（使用bilinear插值，保持边缘平滑）
+    scaled_img = F.interpolate(
+        img_tensor, 
+        size=(new_h, new_w), 
+        mode='bilinear', 
+        align_corners=False
+    )
+    
+    # 3. 计算缩放后图像在输出张量中的中心位置
+    start_h = (H - new_h) // 2
+    start_w = (W - new_w) // 2
+    end_h = start_h + new_h
+    end_w = start_w + new_w
+    
+    # 4. 创建输出张量，初始填充pad_value
+    output = torch.full_like(img_tensor, pad_value, dtype=img_tensor.dtype)
+    
+    # 5. 将缩放后的图像放入中心位置
+    output[:, :, start_h:end_h, start_w:end_w] = scaled_img
+    
+    # 恢复原始维度（如果输入是3维）
+    if is_3d:
+        output = output.squeeze(0)
+    
+    return output
 
 def resized_images(
     images: torch.Tensor,          # 输入图像张量，shape=(B, C, H, W)
@@ -2904,3 +3303,330 @@ def get_max_score_for_label(results: dict, ref_label: int) -> torch.Tensor:
         max_score = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
 
     return max_score
+
+
+
+
+def get_true_ratio_per_channel(bool_arr: np.ndarray) -> np.ndarray:
+    """
+    计算shape为(n, H, W)的bool类型numpy数组中，每个通道（n维度）True的比例
+    
+    参数:
+        bool_arr: 输入数组，必须是3维bool数组，shape=(n, H, W)
+    
+    返回:
+        ratio_arr: 各通道True的比例数组，shape=(n,)，值范围[0,1]
+    """
+    # 1. 输入校验（避免维度/类型错误）
+    if bool_arr.ndim != 3:
+        raise ValueError(f"输入必须是3维数组（n*H*W），当前维度：{bool_arr.ndim}")
+    if bool_arr.dtype != np.bool_:
+        raise TypeError(f"输入必须是bool类型数组，当前类型：{bool_arr.dtype}")
+    
+    # 2. 拆分维度
+    n, H, W = bool_arr.shape
+    
+    # 3. 按通道统计True数量（沿H、W维度求和，保留n维度）
+    # True=1，False=0，sum后得到每个通道的True总数
+    true_count_per_channel = np.sum(bool_arr, axis=(1, 2))
+    
+    # 4. 计算每个通道的总元素数（H*W）
+    total_per_channel = H * W
+    
+    # 5. 计算每个通道的True比例
+    ratio_per_channel = true_count_per_channel / total_per_channel
+    
+    return ratio_per_channel
+
+
+def fit_canny_to_mask(canny_tensor: torch.Tensor, mask_np: np.ndarray) -> torch.Tensor:
+    """
+    将B*C*H*W的Canny边缘张量缩放适配到B*H*W的Mask区域，并仅保留Mask内的Canny边缘
+    
+    参数:
+        canny_tensor: 输入Canny边缘张量，shape=(B, C, H_canny, W_canny)，dtype=torch.float32/uint8，值范围0~1或0~255
+        mask_np: 输入Mask数组，shape=(B, H_mask, W_mask)，dtype=np.bool_/np.uint8（True/255表示有效区域）
+    
+    返回:
+        masked_canny: 缩放后仅保留Mask区域的Canny张量，shape=(B, C, H_mask, W_mask)，值范围0~1
+    """
+    # ========== 1. 输入校验 ==========
+    # 校验Batch维度一致
+    if canny_tensor.shape[0] != mask_np.shape[0]:
+        raise ValueError(f"Canny Batch数({canny_tensor.shape[0]})与Mask Batch数({mask_np.shape[0]})不匹配")
+    # 校验Mask维度（必须是B*H*W）
+    if mask_np.ndim != 3:
+        raise ValueError(f"Mask必须是3维(B*H*W)，当前维度：{mask_np.ndim}")
+    # 校验Canny维度（必须是B*C*H*W）
+    if canny_tensor.ndim != 4:
+        raise ValueError(f"Canny必须是4维(B*C*H*W)，当前维度：{canny_tensor.ndim}")
+    
+    # ========== 2. 预处理 ==========
+    B, C, _, _ = canny_tensor.shape
+    H_mask, W_mask = mask_np.shape[1], mask_np.shape[2]
+    # Mask转张量（bool型）+ 扩展通道维度（B*H*W → B*1*H*W）
+    mask_tensor = torch.from_numpy(mask_np).to(canny_tensor.device)
+    if mask_tensor.dtype != torch.bool:
+        mask_tensor = mask_tensor > 0  # 统一转为bool（255→True，0→False）
+    mask_tensor = mask_tensor.unsqueeze(1)  # B*1*H*W
+    
+    # Canny值归一化到0~1（兼容0~255的输入）
+    if canny_tensor.dtype == torch.uint8:
+        canny_tensor = canny_tensor.float() / 255.0
+    canny_tensor = torch.clamp(canny_tensor, 0.0, 1.0)
+    
+    # ========== 3. 逐Batch缩放Canny到Mask尺寸（保持比例） ==========
+    masked_canny_list = []
+    for b in range(B):
+        # 取出单Batch数据
+        canny_single = canny_tensor[b:b+1]  # 1*C*H_canny*W_canny
+        mask_single = mask_tensor[b:b+1]    # 1*1*H_mask*W_mask
+        
+        # 3.1 计算缩放比例（保持Canny宽高比，适配Mask尺寸）
+        H_canny, W_canny = canny_single.shape[2], canny_single.shape[3]
+        # 计算宽/高缩放系数（取最小系数，避免超出Mask）
+        scale_h = H_mask / H_canny
+        scale_w = W_mask / W_canny
+        scale = min(scale_h, scale_w)  # 等比例缩放，保证Canny完全放入Mask
+        
+        # 3.2 缩放Canny
+        new_H = int(H_canny * scale)
+        new_W = int(W_canny * scale)
+        canny_scaled = torchvision.transforms.functional.resize(canny_single, size=(new_H, new_W), antialias=True)  # 1*C*new_H*new_W
+        
+        # 3.3 居中填充到Mask尺寸（空白区域补0）
+        # 计算上下左右填充量
+        pad_top = (H_mask - new_H) // 2
+        pad_bottom = H_mask - new_H - pad_top
+        pad_left = (W_mask - new_W) // 2
+        pad_right = W_mask - new_W - pad_left
+        # 填充（空白区域补0）
+        canny_padded = torchvision.transforms.functional.pad(
+            canny_scaled,
+            padding=[pad_left, pad_top, pad_right, pad_bottom],
+            fill=0.0,
+            padding_mode="constant"
+        )  # 1*C*H_mask*W_mask
+        
+        # 3.4 仅保留Mask区域的Canny（非Mask区域置0）
+        canny_masked = canny_padded * mask_single  # 1*C*H_mask*W_mask
+        masked_canny_list.append(canny_masked)
+    
+    # ========== 4. 合并结果 ==========
+    masked_canny = torch.cat(masked_canny_list, dim=0)  # B*C*H_mask*W_mask
+    
+    return masked_canny
+
+
+def fit_canny_to_xyxy_boxes(canny_tensor: torch.Tensor, xyxy_boxes: list,resize_scale) -> torch.Tensor:
+    """
+    将B*C*H*W的Canny边缘张量，逐Batch等比例缩放到对应xyxy方框内（以方框左上角为原点，不居中）
+    
+    参数:
+        canny_tensor: 输入Canny张量，shape=(B, C, H_canny, W_canny)，dtype=torch.float32，值范围0~1
+        xyxy_boxes: 长度为B的列表，每个元素是[min_x, min_y, max_x, max_y]（xyxy格式，基于Canny原图的像素坐标）
+    
+    返回:
+        boxed_canny: 缩放后仅填充xyxy方框的Canny张量，shape=(B, C, H_canny, W_canny)，方框外为0
+    """
+    # ========== 1. 输入校验 ==========
+    B, C, H_canny, W_canny = canny_tensor.shape
+    # 校验列表长度与Batch数一致
+    if len(xyxy_boxes) != B:
+        raise ValueError(f"xyxy列表长度({len(xyxy_boxes)})与Canny Batch数({B})不匹配")
+    # 校验每个xyxy的格式
+    for b, box in enumerate(xyxy_boxes):
+        if len(box) != 4:
+            raise ValueError(f"Batch{b}的xyxy格式错误，需为[min_x, min_y, max_x, max_y]，当前长度：{len(box)}")
+        min_x, min_y, max_x, max_y = box
+        # 校验坐标有效性
+        if min_x < 0 or min_y < 0 or max_x > W_canny or max_y > H_canny:
+            raise ValueError(f"Batch{b}的xyxy坐标超出Canny范围(W={W_canny}, H={H_canny})：{box}")
+        if min_x >= max_x or min_y >= max_y:
+            raise ValueError(f"Batch{b}的xyxy坐标无效（min >= max）：{box}")
+    scaled_boxes = [[int(coord * resize_scale[b].item()) for coord in box] for b, box in enumerate(xyxy_boxes)]
+    # ========== 2. 逐Batch处理 ==========
+    boxed_canny_list = []
+    for b in range(B):
+        # 取出单Batch数据
+        canny_single = canny_tensor[b:b+1]  # 1*C*H_canny*W_canny
+        min_x, min_y, max_x, max_y =scaled_boxes[b]
+        
+        # 2.1 计算方框的宽高
+        box_w = max_x - min_x
+        box_h = max_y - min_y
+        
+        # 2.2 计算等比例缩放系数（保证Canny完全放入方框，不拉伸）
+        # Canny原图的宽高
+        canny_h, canny_w = H_canny, W_canny
+        # 宽/高方向的缩放系数
+        scale_w = box_w / canny_w
+        scale_h = box_h / canny_h
+        scale = min(scale_w, scale_h)  # 取最小系数，避免超出方框
+        scale*=0.8
+        # 2.3 缩放Canny到方框适配尺寸
+        new_canny_h = math.floor(canny_h * scale)
+        new_canny_w = math.floor(canny_w * scale)
+        canny_scaled = torchvision.transforms.functional.resize(canny_single, size=(new_canny_h, new_canny_w), antialias=True)
+
+        canvas = torch.zeros_like(canny_single)  # 1*C*H_canny*W_canny
+        
+
+        fill_x1 = box_w//2-new_canny_w//2
+        fill_x2 = fill_x1+new_canny_w
+        fill_y1 = box_h//2-new_canny_h//2
+        fill_y2 =  fill_y1+new_canny_h
+
+        
+        # 填充到画布（从方框左上角开始放置）
+        canvas[:, :, fill_y1:fill_y2, fill_x1:fill_x2] = canny_scaled
+        
+        boxed_canny_list.append(canvas)
+    
+    # ========== 3. 合并结果 ==========
+    boxed_canny = torch.cat(boxed_canny_list, dim=0)  # B*C*H_canny*W_canny
+    
+    return boxed_canny
+
+
+def align_tensor_dtype(target_tensor: torch.Tensor, ref_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    将目标张量的dtype和设备对齐到参考张量
+    Args:
+        target_tensor: 需要转换的张量
+        ref_tensor: 参考张量（作为类型/设备模板）
+    Returns:
+        转换后的目标张量（与参考张量dtype+device完全一致）
+    """
+    # 1. 对齐数据类型
+    if target_tensor.dtype != ref_tensor.dtype:
+        target_tensor = target_tensor.to(dtype=ref_tensor.dtype)
+    # 2. 对齐设备（CPU/GPU）
+    if target_tensor.device != ref_tensor.device:
+        target_tensor = target_tensor.to(device=ref_tensor.device)
+    return target_tensor
+
+
+
+
+
+def create_center_rect_mask(img_size, rect_size, batch_size=1, dtype=np.uint8):
+    """
+    生成中心矩形掩码矩阵：中心指定尺寸的矩形区域为1，其余区域为0，支持批次维度
+    
+    参数：
+        img_size (int/tuple): 掩码矩阵尺寸，支持两种输入：
+                             - int: 生成(img_size, img_size)的正方形掩码
+                             - tuple: 生成(img_h, img_w)的矩形掩码（如(512, 640)）
+        rect_size (int/tuple): 中心矩形尺寸，支持两种输入：
+                              - int: 生成(rect_size, rect_size)的正方形矩形
+                              - tuple: 生成(rect_h, rect_w)的矩形（如(100, 80)）
+        batch_size (int): 批次维度大小（B），默认1，生成B×H×W的掩码张量
+        dtype (np.dtype): 掩码矩阵的数据类型，默认np.uint8
+    
+    返回：
+        np.ndarray: 掩码矩阵，形状为(batch_size, img_h, img_w)，矩形区域为1，其余为0
+    
+    异常：
+        ValueError: 当输入尺寸为非正数、矩形尺寸超过掩码尺寸或batch_size≤0时抛出
+    """
+    # 新增：校验batch_size合法性
+    if not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError(f"batch_size必须为正整数，当前输入：{batch_size}")
+    
+    # 1. 统一尺寸格式（兼容int/tuple输入）
+    if isinstance(img_size, int):
+        img_h, img_w = img_size, img_size
+    elif isinstance(img_size, (tuple, list)) and len(img_size) == 2:
+        img_h, img_w = img_size
+    else:
+        raise ValueError(f"img_size必须是int或长度为2的tuple/list，当前输入：{img_size}")
+    
+    if isinstance(rect_size, int):
+        rect_h, rect_w = rect_size, rect_size
+    elif isinstance(rect_size, (tuple, list)) and len(rect_size) == 2:
+        rect_h, rect_w = rect_size
+    else:
+        raise ValueError(f"rect_size必须是int或长度为2的tuple/list，当前输入：{rect_size}")
+    
+    # 2. 参数合法性校验
+    if img_h <= 0 or img_w <= 0:
+        raise ValueError(f"掩码尺寸必须为正数，当前：({img_h}, {img_w})")
+    if rect_h <= 0 or rect_w <= 0:
+        raise ValueError(f"矩形尺寸必须为正数，当前：({rect_h}, {rect_w})")
+    if rect_h > img_h or rect_w > img_w:
+        raise ValueError(f"矩形尺寸({rect_h}, {rect_w})不能超过掩码尺寸({img_h}, {img_w})")
+    
+    # 3. 初始化单张全0掩码（H×W）
+    single_mask = np.zeros((img_h, img_w), dtype=dtype)
+    
+    # 4. 计算中心矩形的边界（确保居中）
+    center_h = img_h // 2
+    center_w = img_w // 2
+    
+    h_start = center_h - rect_h // 2
+    h_end = center_h + rect_h // 2
+    w_start = center_w - rect_w // 2
+    w_end = center_w + rect_w // 2
+    
+    # 处理偶数/奇数尺寸的边界对齐（确保矩形尺寸准确）
+    if rect_h % 2 == 0:
+        h_end = center_h + rect_h // 2
+    else:
+        h_end = center_h + rect_h // 2 + 1
+    
+    if rect_w % 2 == 0:
+        w_end = center_w + rect_w // 2
+    else:
+        w_end = center_w + rect_w // 2 + 1
+    
+    # 5. 将中心矩形区域设为1（单张掩码）
+    single_mask[h_start:h_end, w_start:w_end] = 1
+    
+    # 6. 扩展批次维度：将单张掩码复制batch_size次，形成B×H×W
+    batch_mask = np.repeat(single_mask[np.newaxis, ...], batch_size, axis=0)
+    
+    return batch_mask
+
+
+
+def calculate_resize_scale_back(resize_scale):
+    """
+    计算resize_scale的倒数（resize_scale_back = 1/resize_scale）
+    兼容tensor/列表（含长度为b的元组）两种输入类型
+    
+    参数：
+        resize_scale: 缩放因子，支持两种类型：
+                      - torch.Tensor: 任意形状的张量（如[B,] / [B,2]）
+                      - list: 元素为元组，每个元组长度为b（如[(s1, s2), (s3, s4)]）
+    返回：
+        resize_scale_back: 与输入类型/形状一致的倒数结果
+    """
+    # 情况1：输入为torch.Tensor
+    if isinstance(resize_scale, torch.Tensor):
+        # 防止除零错误
+        if (resize_scale == 0).any():
+            raise ValueError("resize_scale张量中包含0值，无法计算倒数！")
+        resize_scale_back = 1.0 / resize_scale
+        return resize_scale_back
+    
+    # 情况2：输入为list（元素是长度为b的元组）
+    elif isinstance(resize_scale, list):
+        resize_scale_back = []
+        for tup in resize_scale:
+            # 校验元组长度（确保是长度为b的元组）
+            if not isinstance(tup, tuple):
+                raise TypeError(f"列表元素必须是元组，当前元素类型：{type(tup)}")
+            # 对元组中每个元素计算倒数
+            tup_back = tuple(1.0 / s for s in tup if s != 0)
+            # 校验元组长度是否一致（防止除零后长度变化）
+            if len(tup_back) != len(tup):
+                raise ValueError(f"元组{tup}中包含0值，无法计算倒数！")
+            resize_scale_back.append(tup_back)
+        return resize_scale_back
+    
+    # 情况3：不支持的类型
+    else:
+        raise TypeError(
+            f"不支持的resize_scale类型：{type(resize_scale)}，仅支持torch.Tensor或包含元组的list！"
+        )

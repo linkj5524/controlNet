@@ -21,7 +21,16 @@ from util import *
 '''  
 
 
-
+coco2yolo_class_mapping = {
+    1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+    11: 10, 13: 11, 14: 12, 15: 13, 16: 14, 17: 15, 18: 16, 19: 17, 20: 18, 21: 19,
+    22: 20, 23: 21, 24: 22, 25: 23, 27: 24, 28: 25, 31: 26, 32: 27, 33: 28, 34: 29,
+    35: 30, 36: 31, 37: 32, 38: 33, 39: 34, 40: 35, 41: 36, 42: 37, 43: 38, 44: 39,
+    46: 40, 47: 41, 48: 42, 49: 43, 50: 44, 51: 45, 52: 46, 53: 47, 54: 48, 55: 49,
+    56: 50, 57: 51, 58: 52, 59: 53, 60: 54, 61: 55, 62: 56, 63: 57, 64: 58, 65: 59,
+    67: 60, 70: 61, 72: 62, 73: 63, 74: 64, 75: 65, 76: 66, 77: 67, 78: 68, 79: 69,
+    80: 70, 81: 71, 82: 72, 84: 73, 85: 74, 86: 75, 87: 76, 88: 77, 89: 78, 90: 79
+}
 
 '''
 class ObjectDetection:
@@ -402,7 +411,7 @@ class ObjectDetection:
                     x1, y1, x2, y2 = map(int, boxes[idx].detach().cpu().numpy())
                     confidence = scores[idx].detach().cpu().numpy()
                     class_id = labels[idx].detach().cpu().numpy()
-                    if class_id >= len(self.names):
+                    if class_id == len(self.names):
                         class_name = "Other"
                     else:
                         class_name = self.names[int(class_id)]
@@ -492,7 +501,7 @@ class ObjectDetection:
             raise ValueError(f"不支持的模型类型: {model_type}")
 
     @torch.no_grad()
-    def detect_eval(self, images: torch.Tensor, model_type: str,file_path: Optional[str] = None,file_name='detect.jpg'):
+    def detect_eval(self, images: torch.Tensor, model_type: str,file_path: Optional[str] = None,file_name='detect.jpg',grad_status=True):
         """
         执行检测并返回统一格式的结果
         Args:
@@ -515,40 +524,43 @@ class ObjectDetection:
             images = images.to(model_dtype)
 
         # # 模型前向推理
-        # if model_type == "yolo":
-        #     raw_outputs = self._yolov8_inference(processed_images)
-        if "yolo" in model_type:
-            
+        with torch.set_grad_enabled(grad_status):
+            if "yolo" in model_type:
+                
 
 
-            # 判断device
-            device = next(self.models[model_type].parameters()).device
-            images = images.to(device)
-            infer_results = self.models[model_type](images)  
-            out = infer_results[0]
-            out = out.permute(0, 2, 1).contiguous()  # [B,N,84]
-            width, height = images.shape[-1], images.shape[-2]
+                # 判断device
+                device = next(self.models[model_type].parameters()).device
+                images = images.to(device)
+                infer_results = self.models[model_type](images)  
+                out = infer_results[0]
+                out = out.permute(0, 2, 1).contiguous()  # [B,N,84]
+                width, height = images.shape[-1], images.shape[-2]
 
-            # 解码多batch结果
-            batch_results = self._decode_yolo_output(out)
-
-
+                # 解码多batch结果
+                batch_results = self._decode_yolo_output(out)
 
 
 
-        elif model_type in ["fasterrcnn", "ssd300"]:
-            # 判断device
-            device = next(self.models[model_type].parameters()).device
-            processed_images = move_to_gpu_and_cast_dtype(images, device)
-            raw_outputs = self._torchvision_inference(processed_images, model_type)
-            batch_results = self._decode_output(raw_outputs, model_type)
-        else:
-            raise ValueError(f"不支持的模型类型: {model_type}")
+
+
+            elif model_type in ["fasterrcnn", "ssd300"]:
+                # 判断device
+                device = next(self.models[model_type].parameters()).device
+                processed_images = move_to_gpu_and_cast_dtype(images, device)
+                raw_outputs = self._torchvision_inference(processed_images, model_type)
+                batch_results = self._decode_output(raw_outputs, model_type)
+            else:
+                raise ValueError(f"不支持的模型类型: {model_type}")
         
-            
+        # --------------------------
+        # 3. 提取每个batch的主类别（置信度最高）
+        # --------------------------
+        class_names=self._get_class_per_batch(batch_results)  
+
         if file_path is not None:
             self.visualize_detections(images, batch_results, save_path=file_path,file_name=file_name)
-        return batch_results
+        return batch_results,class_names
 
     def _preprocess_images(self, images: torch.Tensor, model_type: str) :
         """图像预处理，适配不同模型的输入要求"""
@@ -644,10 +656,10 @@ class ObjectDetection:
             scores_vector_list.append(scores_vector)
             # 整理为与_decode_yolo_output一致的字典格式（长度为1的列表，代表单batch）
         results = {
-            'boxes': boxes_list,          # list[Tensor], 长度=1，元素[M,4]
-            'scores': scores_list,        # list[Tensor], 长度=1，元素[M]
-            'labels': labels_list,        # list[Tensor], 长度=1，元素[M]
-            'scores_vector': scores_vector_list  # list[Tensor], 长度=1，元素[M, num_classes]
+            'boxes': boxes_list,          # list[Tensor], 长度=B，元素[M,4],M为每个批次里面检测框的数量
+            'scores': scores_list,        # list[Tensor], 长度=B，元素[M]
+            'labels': labels_list,        # list[Tensor], 长度=B，元素[M]
+            'scores_vector': scores_vector_list  # list[Tensor], 长度=B，元素[M, num_classes]
         }
         return results
 
@@ -668,8 +680,10 @@ class ObjectDetection:
             # 过滤低置信度结果
             boxes = raw_out["boxes"]
             scores = raw_out["scores"]
-            # 标签减1，因为TorchVision的标签从1开始编号，同时避免类型变化
-            labels = raw_out["labels"]-1
+            
+            # label 映射
+            map_labels=   map_coco_to_yolo_labels( raw_out["labels"]) 
+            labels =  map_labels  
 
             mask = scores > self.conf_threshold
             boxes = boxes[mask].to(self.device)

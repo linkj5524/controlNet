@@ -120,15 +120,23 @@ if __name__ == '__main__':
     if ref_canny.dim()==3:  # 添加维度
         ref_canny = ref_canny.unsqueeze(0)
   
-    exp_root_dir=adv_config["experiment_params"]["experiment_path"]
-    
-    exp_root=os.path.join(exp_root_dir, "exp_"+time.strftime("%Y%m%d_%H%M%S", time.localtime()))
+    exp_root=adv_config["experiment_params"]["experiment_path"]
+
     os.makedirs(exp_root,exist_ok=True) 
     # 将yaml文件复制到实验目录
     shutil.copy(attack_config_path, exp_root)
 
     accur_all_dict={}
     accur_num=0
+
+
+    # numpy数组，shape=(B, H, W)，支持布尔型/0-1数值型
+    crop_size=(350,350)
+    mask_object=create_center_rect_mask(img_size=IMG_SIZE, 
+                                        rect_size=crop_size,
+                                        batch_size=BATCH_SIZE,
+                                        dtype=np.bool_)
+    
 
     pbar = tqdm(enumerate(img_loader), total=len(img_loader), desc="Processing images", unit="batch")
     for batch_idx, (images, images_path) in pbar:
@@ -145,6 +153,7 @@ if __name__ == '__main__':
         accur_dict=attack.generate_adversarial_mainV5(background_imag=images,
                                             ref_texture=None,
                                             ref_canny=ref_canny,
+                                            mask_adv=mask_object,
                                             exp_path=exp_paths_list,
                                             detect_params=adv_config["detect_params"],
                                             attribution_params=adv_config["attribution_params"],
@@ -171,33 +180,4 @@ if __name__ == '__main__':
             
         attack.destroy_controlnet()
 
-    # 将参数写到yaml文件里面。并保存
-
-
-    # ===== 原有计算均值/ASR的代码保留，删除attack.set_params和attack.save_params =====
-    original_keys = list(accur_all_dict.keys())
-    # 步骤2：遍历原始keys计算并新增均值/ASR
-    for key in original_keys:  # 获取平均值
-        temp=accur_all_dict[key]/accur_num
-        key_temp=key+"_mean"
-        key_asr=key+"_asr"
-        accur_all_dict[key_temp]=temp
-        accur_all_dict[key_asr]=1-temp
-
-    # ===== 核心修改：直接将结果写入YAML文件 =====
-    # 1. 补充总样本数到结果字典（便于后续分析）
-    accur_all_dict["total_adv_num"] = accur_num
-
-    # 2. 定义YAML保存路径
-    result_path = os.path.join(exp_root, "results.yaml")
-
-    # 3. 写入YAML文件（保证中文/特殊字符正常，格式美观）
-    try:
-        with open(result_path, 'w', encoding='utf-8') as f:
-            # default_flow_style=False：让YAML按行显示，更易读
-            yaml.dump(accur_all_dict, f, default_flow_style=False, allow_unicode=True)
-        print(f"结果已成功保存到：{result_path}")
-        print(f"保存的参数：{accur_all_dict}")
-    except Exception as e:
-        print(f"保存YAML文件失败：{str(e)}")
 
