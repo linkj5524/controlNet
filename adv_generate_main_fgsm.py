@@ -39,7 +39,7 @@ parser = argparse.ArgumentParser(description="Adversarial Attack Main Program") 
 # 2. 添加命令行参数
 
 parser.add_argument('--attack_config_path', type=str, 
-                    default="models/attack_config.yaml",
+                    default="models/fgsm_config.yaml",
                       help="attack config path")
 
 
@@ -110,18 +110,9 @@ if __name__ == '__main__':
 
 
 
-    # --------------------------
-    # 4. 迭代（对抗样本生成）
-    # --------------------------
-    ref_path=r"data/adv_patch/ssd-dog.png"
-    adv_patch=cv2.imread(ref_path)
-    adv_patch=cv2.resize(adv_patch, (512, 512))
-    adv_patch_tensor=cv2_to_tensor(adv_patch)
-    if adv_patch_tensor.dim()==3:  # 添加维度
-        adv_patch_tensor = adv_patch_tensor.unsqueeze(0)
 
 
-  
+
     exp_root_dir=adv_config["experiment_params"]["experiment_path"]
     
     exp_root=os.path.join(exp_root_dir, "exp_"+time.strftime("%Y%m%d_%H%M%S", time.localtime()))
@@ -131,7 +122,6 @@ if __name__ == '__main__':
 
     accur_all_dict={}
     accur_num=0
-    advlogo_config_path=r"models/advlogo_config.yaml"
 
     pbar = tqdm(enumerate(img_loader), total=len(img_loader), desc="Processing images", unit="batch")
     for batch_idx, (images, images_path) in pbar:
@@ -145,16 +135,14 @@ if __name__ == '__main__':
             exp_paths_list.append(temp)
         
 
-        accur_dict=attack.generate_adversarial_advlogo_mainV5(background_imag=images,
-                            adv_patch_tensor=adv_patch_tensor, 
-                            exp_path=exp_paths_list,
-                            detect_params=adv_config["detect_params"],
-                            attribution_params=adv_config["attribution_params"],
-                            attack_params=adv_config["attak_params"],
-                            config_yaml_path=advlogo_config_path
-                            )
 
 
+        accur_dict= attack.generate_adversarial_fgsm_mainV5(
+                background_imag=images,
+                exp_path=exp_paths_list,
+                detect_params=adv_config["detect_params"],
+                config_yaml_parmars=adv_config["attak_params"],
+            )
         
         if accur_dict is not None:
             print(f" current adv example accuracy : {accur_dict}")

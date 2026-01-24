@@ -42,6 +42,7 @@ from sd_inpaint import *
 from IDG_util.attribution_methods.saliencyMethods import * 
 from vae import *
 from ADVLogo_attack_tools import *
+from fgsm_attack_tools import *
 
 class ADV_ATTACK:
     def __init__(self, config_path:str='./models/cldm_v15.yaml',
@@ -2682,8 +2683,155 @@ class ADV_ATTACK:
 
         adv_count_dict=count_matched_results(adv_result_dict,result_gt)
 
+        for i,exp_root_dir in enumerate(exp_path):
+            tensor2picture(adv_img_batch[i],os.path.join(exp_root_dir, 'adv_example.jpg')) 
+
         return adv_count_dict
 
+
+    def generate_adversarial_fgsm_mainV5(
+            self,
+            background_imag=None,                  # [B,C,H,W]
+            exp_path=[r'./exp/exp_example'],
+            detect_params=None,
+            config_yaml_parmars=None):
+
+        """
+        FGSM / i-FGSM adversarial example generation (ROI-aware)
+        """
+
+        # ====================================================
+        # 1. preprocessing
+        # ====================================================
+        # 图像预处理，
+        background_imag=pad_to_square(background_imag)
+
+        params=config_yaml_parmars
+        # 设置随机种子以确保结果可复现
+        torch.manual_seed(params["seed"])
+        np.random.seed(params["seed"])
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
+
+
+       # detect model 初始化
+        detect_model=self.init_object_detection_return(device,
+                                                       detect_params)
+
+
+        detect_model_type=detect_params['attack_model']['model_type']
+
+        result_gt,object_class =detect_model.detect_eval(background_imag,
+                                                             file_path=exp_path,
+                                                             file_name='detect_object_ref.jpg',
+                                                             grad_status=True,
+                                                             model_type=detect_model_type)
+        
+        for i,exp_root_dir in enumerate(exp_path):
+            tensor2picture(background_imag[i],os.path.join(exp_root_dir, 'origin.jpg')) 
+
+
+        if len(result_gt['boxes'][0])<1:
+            self.destroy_object_detection(detect_model)
+            return 
+        # 返回的检测框可能是挑选过的
+        mask_logic_np_select,result_gt,object_class=self.mask_generate(
+                         background_imag=background_imag,
+                        result_gt=result_gt,
+                        object_class=object_class,
+                        mask_type=params["mask_type"],
+                        connected_component=params["connected_component"],
+                        )
+
+
+        # 
+        ref_result_dict=self.detect_val(
+            input_image=background_imag,
+            input_path=exp_path,
+            input_file_name='origin_example',
+            detect_params=detect_params
+        )
+        ref_count_dict=count_matched_results(ref_result_dict,result_gt)
+
+        for model_key in ref_count_dict:
+            if ref_count_dict[model_key] <1:
+                # 不完全匹配
+                return None
+
+
+        if mask_logic_np_select is None:
+            return None
+
+
+        # ROI boxes list (for FGSM / i-FGSM)
+        boxes_list = result_gt["boxes"]
+
+        # ====================================================
+        # 6. choose FGSM / i-FGSM
+        # ====================================================
+        attack_method = params["method"].lower()
+
+        if attack_method == "fgsm":
+            adv_img_batch = fgsm_od(
+                x=background_imag,
+                od_model=detect_model,
+                model_type=detect_model_type,
+                boxes_list=boxes_list,
+                eps=params["eps"],
+                targeted=params["targeted"],
+                target_label=params["target_label"],
+                loss_type=params["loss_type"]
+            )
+
+        elif attack_method == "ifgsm":
+            adv_img_batch = ifgsm_od(
+                x=background_imag,
+                od_model=detect_model,
+                model_type=detect_model_type,
+                boxes_list=boxes_list,
+                eps=params["eps"],
+                alpha=params["alpha"],
+                iteration=params["iteration"],
+                targeted=params["targeted"],
+                target_label=params["target_label"],
+                loss_type=params["loss_type"]
+            )
+
+        else:
+            raise ValueError(f"Unsupported attack method: {attack_method}")
+
+        # ====================================================
+        # 7. detect adversarial image
+        # ====================================================
+        adv_result_dict = self.detect_val(
+            input_image=adv_img_batch,
+            input_path=exp_path,
+            input_file_name='adv_example',
+            detect_params=detect_params
+        )
+
+        adv_count_dict = count_matched_results(
+            adv_result_dict,
+            result_gt
+        )
+
+        # ====================================================
+        # 8. save adversarial images
+        # ====================================================
+        for i, exp_root_dir in enumerate(exp_path):
+            tensor2picture(
+                adv_img_batch[i],
+                os.path.join(exp_root_dir, 'adv_example.jpg')
+            )
+
+        # ====================================================
+        # 9. clean & return
+        # ====================================================
+        self.destroy_object_detection(detect_model)
+
+        return adv_count_dict
 
 
 
@@ -2986,8 +3134,8 @@ if __name__=='__main__':
     # 模型参数里面包含 ControlNet 和ControlledUnetModel 的参数
 
     #RGB 参数
-    attack_config_path=r"models/attack_config.yaml"
-
+    # attack_config_path=r"models/attack_config.yaml"
+    attack_config_path=r"models/fgsm_config.yaml"
 
     adv_config=load_yaml_config(attack_config_path)
 
@@ -3043,15 +3191,14 @@ if __name__=='__main__':
     #                                     attribution_params=adv_config["attribution_params"],
     #                                     attack_params=adv_config["attak_params"]
     #                                    )
-    advlogo_config_path=r"models/advlogo_config.yaml"
-    attack.generate_adversarial_advlogo_mainV5(background_imag=img,
-                                       adv_patch_tensor=adv_patch_tensor, 
-                                       exp_path=[exp_root_test],
-                                        detect_params=adv_config["detect_params"],
-                                        attribution_params=adv_config["attribution_params"],
-                                        attack_params=adv_config["attak_params"],
-                                        config_yaml_path=advlogo_config_path
-                                       )
+
+
+    attack.generate_adversarial_fgsm_mainV5(
+        background_imag=img,
+        exp_path=[exp_root_test],
+        detect_params=adv_config["detect_params"],
+        config_yaml_parmars=adv_config["attak_params"],
+    )
     end_time=time.time()
     print(f"time: {end_time - st_time:.2f}s")
 
