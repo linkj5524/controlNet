@@ -2,6 +2,7 @@
 import time
 
 from omegaconf import OmegaConf
+
 from share import *
 
 import numpy as np
@@ -40,6 +41,7 @@ from captioner_blip_model import *
 from sd_inpaint import *
 from IDG_util.attribution_methods.saliencyMethods import * 
 from vae import *
+from ADVLogo_attack_tools import *
 
 class ADV_ATTACK:
     def __init__(self, config_path:str='./models/cldm_v15.yaml',
@@ -2571,6 +2573,121 @@ class ADV_ATTACK:
 
 
 
+
+    def generate_adversarial_advlogo_mainV5(self,
+                                    background_imag=None,
+                                    adv_patch_tensor=None, 
+                                    exp_path=[r'./exp/exp_example'],
+                                    detect_params=None,
+                                    attribution_params=None,
+                                    attack_params=None,
+                                    config_yaml_path='./config.yaml'):
+        """
+        生成对抗样本
+        
+        参数:
+            control_image: 控制图像 (用于ControlNet)
+            params: 覆盖默认参数的字典
+            
+        """
+        """
+            ====================================================
+            ============ 图像预处理，初始目标的获取 ==============
+            ====================================================
+        """
+        # 图像预处理，
+        background_imag=pad_to_square(background_imag)
+
+        params=attack_params
+        # 设置随机种子以确保结果可复现
+        torch.manual_seed(params["seed"])
+        np.random.seed(params["seed"])
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        B,C,H, W= background_imag.shape
+        shape = (4, H // 8, W // 8)
+
+
+       # detect model 初始化
+        detect_model=self.init_object_detection_return(device,
+                                                       detect_params)
+
+
+        detect_model_type=detect_params['attack_model']['model_type']
+
+        result_gt,object_class =detect_model.detect_eval(background_imag,
+                                                             file_path=exp_path,
+                                                             file_name='detect_object_ref.jpg',
+                                                             grad_status=True,
+                                                             model_type=detect_model_type)
+        self.destroy_object_detection(detect_model)
+        for i,exp_root_dir in enumerate(exp_path):
+            tensor2picture(background_imag[i],os.path.join(exp_root_dir, 'origin.jpg')) 
+
+
+        if len(result_gt['boxes'][0])<1:
+            return 
+        # 返回的检测框可能是挑选过的
+        mask_logic_np_select,result_gt,object_class=self.mask_generate(
+                         background_imag=background_imag,
+                        result_gt=result_gt,
+                        object_class=object_class,
+                        mask_type=params["mask_type"],
+                        connected_component=params["connected_component"],
+                        )
+
+
+        # 
+        ref_result_dict=self.detect_val(
+            input_image=background_imag,
+            input_path=exp_path,
+            input_file_name='origin_example',
+            detect_params=detect_params
+        )
+        ref_count_dict=count_matched_results(ref_result_dict,result_gt)
+
+        for model_key in ref_count_dict:
+            if ref_count_dict[model_key] <1:
+                # 不完全匹配
+                return None
+
+
+        if mask_logic_np_select is None:
+            return None
+
+        with open(config_yaml_path, 'r') as f:
+            yaml_config = yaml.safe_load(f)
+
+        class Config:
+            TRANSFORM = yaml_config.get('TRANSFORM', {
+                'rotate': True,
+                'shift': True,
+                'median_pool': True,
+                'jitter': True,
+                'cutout': True
+            })
+            MAX_PATCH_RATIO = yaml_config.get('MAX_PATCH_RATIO', 0.4)
+
+        patch_applier = PatchRandomApplier(device, Config())
+
+        adv_img_batch = patch_applier.apply_patch(background_imag, adv_patch_tensor, result_gt)
+        
+
+        adv_result_dict=self.detect_val(
+            input_image=adv_img_batch,
+            input_path=exp_path,
+            input_file_name='adv_example',
+            detect_params=detect_params
+        )
+
+        adv_count_dict=count_matched_results(adv_result_dict,result_gt)
+
+        return adv_count_dict
+
+
+
+
+
     def to_imgTensor_from_numpy_int8(self, image):
         """
         作用：将numpy数组转换为PyTorch张量。
@@ -2710,7 +2827,142 @@ class ADV_ATTACK:
 
 
 
-# 使用示例
+# #
+# if __name__=='__main__':
+#     # 添加本地包路径,即上一级的路径
+#     os.path.join(os.path.dirname(__file__), "..")
+
+
+
+
+
+#     from annotator.util import resize_image, HWC3
+#     from cldm.model import create_model, load_state_dict
+#     from cldm.ddim_hacked import DDIMSampler
+#     import config
+
+
+#     #判断gpu 是否存在，并给出版本
+#     if torch.cuda.is_available():
+#         print('cuda version:', torch.version.cuda)
+        
+#     else:
+#         print('no cuda')
+#     # 模型参数里面包含 ControlNet 和ControlledUnetModel 的参数
+
+#     #RGB 参数
+#     attack_config_path=r"models/attack_config.yaml"
+
+
+#     adv_config=load_yaml_config(attack_config_path)
+
+
+#     attack = ADV_ATTACK(config_path=adv_config["model_paths"]["control_yaml_path"],
+#                         model_path=adv_config["model_paths"]["controlnet"],
+#                         device=torch.device("cuda"),
+#                         detect_model_type=adv_config["model_types"]["detect_model"],
+#                         model_path_object_detection=adv_config["model_paths"]["detect_model"],
+#                         sam_model_type=adv_config["model_types"]["sam_model"],
+#                         sam_checkpoint_path=adv_config["model_paths"]["sam_model"],
+#                         captioner_model_name=adv_config["model_paths"]["blip_model"],
+#                         inpaint_model_path=adv_config["model_paths"]["inpaint_model"],
+#                         vae_model_path=adv_config["model_paths"]["vae_model"],
+#                         kwargs=adv_config["attak_params"],
+#                         detect_params=adv_config["detect_params"],
+#                         )
+
+
+#     # 读取图像，转化为tensor
+
+#     # img_path=r"../data\select_coco\000000005477.jpg"
+#     # img_path=r"../data\select_coco\000000000724.jpg"
+#     img_path=r'data/select_coco/000000079408.jpg'   
+#     # img_path=r'data/select_coco/000000001296.jpg'
+#     img = cv2.imread(img_path)
+#     img=cv2.resize(img, (512, 512))
+#     # 转化为tensor
+#     # 转换通道
+
+    
+#     img = cv2_to_tensor(img)
+
+
+#     ref_path=r"data/control1.jpg"
+#     ref_tenture=cv2.imread(ref_path,cv2.IMREAD_GRAYSCALE)
+#     ref_tenture=cv2.resize(ref_tenture, (512, 512))
+#     ref_canny=cv2_to_tensor(ref_tenture)
+#     if ref_canny.dim()==3:  # 添加维度
+#         ref_canny = ref_canny.unsqueeze(0)
+
+#     if img.dim()==3:  # 添加维度
+#         img = img.unsqueeze(0)
+
+#     exp_root_test=adv_config["experiment_params"]["experiment_path"]
+#     os.makedirs(exp_root_test,exist_ok=True)
+#     st_time=time.time()
+#     attack.generate_adversarial_mainV5(background_imag=img,
+#                                        ref_texture=None,
+#                                        ref_canny=ref_canny,
+#                                        exp_path=[exp_root_test],
+#                                         detect_params=adv_config["detect_params"],
+#                                         attribution_params=adv_config["attribution_params"],
+#                                         attack_params=adv_config["attak_params"]
+#                                        )
+#     end_time=time.time()
+#     print(f"time: {end_time - st_time:.2f}s")
+
+
+#     # attack.generate_adversarial_main(img)
+
+
+
+#     # attack.init_vae()
+#     # # 测试
+#     # if img.dim()==3:  # 添加维度
+#     #     img = img.unsqueeze(0)
+#     # # VAE测试
+#     # img=move_to_gpu(img)
+#     # attack.vae.to(device=torch.device("cuda"))
+#     # img.requires_grad=True
+#     # attack.vae.eval()
+#     # start_time=time.time()
+#     # posterior_vae=attack.vae.encode(img*2-1)
+#     # latent=posterior_vae.mode()
+#     # img_g=attack.vae.decode(latent)
+#     # end_time=time.time()
+#     # print(f"VAE time: {end_time - start_time:.2f}s")
+#     # # 转化为0-1
+#     # img_g=(img_g+1)/2
+#     # tensor2picture(img_g[0],'test.jpg')
+#     # temp,_=attack.vae(img*2-1,sample_posterior=False)
+#     # temp=(temp+1)/2
+#     # tensor2picture(img_g[0],'test.jpg')
+#     # loss = torch.nn.functional.mse_loss(img_g, img)  # 对比重建图和原图
+#     # loss.backward()  # 反向传播，计算梯度
+
+#     # # 4. 验证梯度是否回传
+#     # print("===== 梯度验证结果 =====")
+#     # # 检查 img 的梯度是否存在且非全零
+#     # if img.grad is not None:
+#     #     grad_norm = torch.norm(img.grad).item()  # 计算梯度范数（标量）
+#     #     print(f"img.grad 存在，梯度范数：{grad_norm:.6f}")
+#     #     if grad_norm > 1e-8:  # 梯度非全零（浮点误差容忍）
+#     #         print("✅ 梯度成功回传到 img！")
+#     #     else:
+#     #         print("❌ img.grad 为全零，梯度未有效回传！")
+#     # else:
+#     #     print("❌ img.grad 不存在，梯度被截断！")
+#     # attack.generate_adversarial_example_optim_control_v2(img)
+#     # attack.generate_adversarial_example(img,control_img)
+#     # attack.generate_adversarial_example_optim_control_v2(img,control_img)
+#     # attack.generate_adversarial_example_optim_control(img,control_img)
+
+
+
+
+
+
+#
 if __name__=='__main__':
     # 添加本地包路径,即上一级的路径
     os.path.join(os.path.dirname(__file__), "..")
@@ -2759,8 +3011,8 @@ if __name__=='__main__':
 
     # img_path=r"../data\select_coco\000000005477.jpg"
     # img_path=r"../data\select_coco\000000000724.jpg"
-    img_path=r'data/select_coco/000000079408.jpg'   
-    # img_path=r'data/select_coco/000000001296.jpg'
+    # img_path=r'exp\for_paper\exp_example\origin.jpg'   
+    img_path=r'data/select_coco/000000001296.jpg'
     img = cv2.imread(img_path)
     img=cv2.resize(img, (512, 512))
     # 转化为tensor
@@ -2770,12 +3022,12 @@ if __name__=='__main__':
     img = cv2_to_tensor(img)
 
 
-    ref_path=r"data/control1.jpg"
-    ref_tenture=cv2.imread(ref_path,cv2.IMREAD_GRAYSCALE)
-    ref_tenture=cv2.resize(ref_tenture, (512, 512))
-    ref_canny=cv2_to_tensor(ref_tenture)
-    if ref_canny.dim()==3:  # 添加维度
-        ref_canny = ref_canny.unsqueeze(0)
+    ref_path=r"data\adv_patch\v2-dog.png"
+    adv_patch=cv2.imread(ref_path)
+    adv_patch=cv2.resize(adv_patch, (256, 256))
+    adv_patch_tensor=cv2_to_tensor(adv_patch)
+    if adv_patch_tensor.dim()==3:  # 添加维度
+        adv_patch_tensor = adv_patch_tensor.unsqueeze(0)
 
     if img.dim()==3:  # 添加维度
         img = img.unsqueeze(0)
@@ -2783,13 +3035,22 @@ if __name__=='__main__':
     exp_root_test=adv_config["experiment_params"]["experiment_path"]
     os.makedirs(exp_root_test,exist_ok=True)
     st_time=time.time()
-    attack.generate_adversarial_mainV5(background_imag=img,
-                                       ref_texture=None,
-                                       ref_canny=ref_canny,
+    # attack.generate_adversarial_mainV5(background_imag=img,
+    #                                    ref_texture=None,
+    #                                    ref_canny=ref_canny,
+    #                                    exp_path=[exp_root_test],
+    #                                     detect_params=adv_config["detect_params"],
+    #                                     attribution_params=adv_config["attribution_params"],
+    #                                     attack_params=adv_config["attak_params"]
+    #                                    )
+    advlogo_config_path=r"models/advlogo_config.yaml"
+    attack.generate_adversarial_advlogo_mainV5(background_imag=img,
+                                       adv_patch_tensor=adv_patch_tensor, 
                                        exp_path=[exp_root_test],
                                         detect_params=adv_config["detect_params"],
                                         attribution_params=adv_config["attribution_params"],
-                                        attack_params=adv_config["attak_params"]
+                                        attack_params=adv_config["attak_params"],
+                                        config_yaml_path=advlogo_config_path
                                        )
     end_time=time.time()
     print(f"time: {end_time - st_time:.2f}s")
@@ -2799,43 +3060,3 @@ if __name__=='__main__':
 
 
 
-    # attack.init_vae()
-    # # 测试
-    # if img.dim()==3:  # 添加维度
-    #     img = img.unsqueeze(0)
-    # # VAE测试
-    # img=move_to_gpu(img)
-    # attack.vae.to(device=torch.device("cuda"))
-    # img.requires_grad=True
-    # attack.vae.eval()
-    # start_time=time.time()
-    # posterior_vae=attack.vae.encode(img*2-1)
-    # latent=posterior_vae.mode()
-    # img_g=attack.vae.decode(latent)
-    # end_time=time.time()
-    # print(f"VAE time: {end_time - start_time:.2f}s")
-    # # 转化为0-1
-    # img_g=(img_g+1)/2
-    # tensor2picture(img_g[0],'test.jpg')
-    # temp,_=attack.vae(img*2-1,sample_posterior=False)
-    # temp=(temp+1)/2
-    # tensor2picture(img_g[0],'test.jpg')
-    # loss = torch.nn.functional.mse_loss(img_g, img)  # 对比重建图和原图
-    # loss.backward()  # 反向传播，计算梯度
-
-    # # 4. 验证梯度是否回传
-    # print("===== 梯度验证结果 =====")
-    # # 检查 img 的梯度是否存在且非全零
-    # if img.grad is not None:
-    #     grad_norm = torch.norm(img.grad).item()  # 计算梯度范数（标量）
-    #     print(f"img.grad 存在，梯度范数：{grad_norm:.6f}")
-    #     if grad_norm > 1e-8:  # 梯度非全零（浮点误差容忍）
-    #         print("✅ 梯度成功回传到 img！")
-    #     else:
-    #         print("❌ img.grad 为全零，梯度未有效回传！")
-    # else:
-    #     print("❌ img.grad 不存在，梯度被截断！")
-    # attack.generate_adversarial_example_optim_control_v2(img)
-    # attack.generate_adversarial_example(img,control_img)
-    # attack.generate_adversarial_example_optim_control_v2(img,control_img)
-    # attack.generate_adversarial_example_optim_control(img,control_img)
